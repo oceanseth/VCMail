@@ -6,7 +6,7 @@
 [![Firebase](https://img.shields.io/badge/Firebase-Realtime%20Database-orange.svg)](https://firebase.google.com/)
 [![AWS](https://img.shields.io/badge/AWS-Lambda%20%7C%20S3-yellow.svg)](https://aws.amazon.com/)
 [![AI](https://img.shields.io/badge/AI-LLM%20Integration-purple.svg)](https://webllm.mlc.ai/)
-[![Oracle](https://img.shields.io/badge/Oracle_Database-F80000?style=flat&logo=oracle&logoColor=white)](https://signup.cloud.oracle.com/)
+[![Oracle](https://img.shields.io/badge/Oracle%20Cloud-F80000?style=flat&logo=Oracle&logoColor=white)](https://signup.cloud.oracle.com/)
 
 VCMail was created while working on Voice Cert technologies, the VC stands for that. But it may also be a great way to communicate over email to Venture Capitalists when starting new companies, showing your expertise along with being security-conscious.
 
@@ -49,7 +49,7 @@ Want more advanced features? Create a free tier Oracle server and run the `serve
 **Today**: Jill is asking about how to handle X.
 
 **AI Magic**: The AI automatically:
-- Gets metadata on X to know you had a conversation with Steve about it
+- Gets metadata on X to know you had a conversation with Steve about it by using [![WhatsApp MCP](https://img.shields.io/badge/WhatsApp-MCP%20Server-green.svg?logo=whatsapp)](https://github.com/lharries/whatsapp-mcp)
 - Knows if you've ever sent an email to Jill and Steve
 - Determines if you've had a conversation on WhatsApp including both Jill and Steve
 - Advises on the email response to Jill about:
