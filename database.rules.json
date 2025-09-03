@@ -1,0 +1,54 @@
+{
+    "rules": {
+      "users": {
+        "$userId": {
+          ".read": "auth != null && auth.uid === $userId",
+          ".write": "auth != null && auth.uid === $userId",
+          "currentChallenge": {
+            ".validate": "newData.isNumber()"
+          },
+          "profile": {
+            ".read": "auth != null && auth.uid === $userId",
+            ".write": "auth != null && auth.uid === $userId"
+          },
+          "emailCounts": {
+            ".read": "auth != null && auth.uid === $userId",
+            ".write": "auth != null && auth.uid === $userId",
+            "inbox": {
+              ".validate": "newData.isNumber() && newData.val() >= 0"
+            },
+            "sent": {
+              ".validate": "newData.isNumber() && newData.val() >= 0"
+            }
+          }
+        }
+      },
+      "emails": {
+        "$uid": {
+          ".indexOn": "timestamp",
+          ".read": "auth != null && auth.uid === $uid",
+          ".write": "auth != null && auth.uid === $uid",
+          "$emailId": {
+            ".validate": "newData.hasChildren(['messageId', 'from', 'to', 'subject', 'timestamp', 'content'])"
+          }
+        }
+      },
+      "sent": {
+        "$uid": {
+          ".indexOn": "timestamp",
+          ".read": "auth != null && auth.uid === $uid",
+          ".write": "auth != null && auth.uid === $uid",
+          "$emailId": {
+            ".validate": "newData.hasChildren(['messageId', 'from', 'to', 'subject', 'timestamp', 'content'])"
+          }
+        }
+      },
+      "usernames": {
+        "$username": {
+          ".read": true,
+          ".write": "auth != null && (!data.exists() || data.val() === auth.uid)",
+          ".validate": "newData.isString() && (!data.exists() || data.val() === auth.uid) && (!root.child('users').child(auth.uid).child('profile').child('username').exists() || root.child('users').child(auth.uid).child('profile').child('username').val() === $username)"
+        }
+      }
+    }
+  }
