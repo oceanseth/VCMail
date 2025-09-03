@@ -5,7 +5,8 @@
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Firebase](https://img.shields.io/badge/Firebase-Realtime%20Database-orange.svg)](https://firebase.google.com/)
 [![AWS](https://img.shields.io/badge/AWS-Lambda%20%7C%20S3-yellow.svg)](https://aws.amazon.com/)
-[![AI](https://img.shields.io/badge/AI-LLM%20Integration-purple.svg)](https://openai.com/)
+[![AI](https://img.shields.io/badge/AI-LLM%20Integration-purple.svg)](https://webllm.mlc.ai/)
+[![Oracle](https://img.shields.io/badge/Oracle_Database-F80000?style=flat&logo=oracle&logoColor=white)](https://signup.cloud.oracle.com/)
 
 VCMail was created while working on Voice Cert technologies, the VC stands for that. But it may also be a great way to communicate over email to Venture Capitalists when starting new companies, showing your expertise along with being security-conscious.
 
