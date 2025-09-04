@@ -1,0 +1,100 @@
+service: voicecert
+
+provider:
+  name: aws
+  runtime: nodejs18.x
+  stage: ${opt:stage, 'prod'}
+  region: us-east-1
+  iam:
+    role:
+      statements:
+        - Effect: Allow
+          Action:
+            - ssm:GetParameter
+          Resource: 
+            - arn:aws:ssm:${aws:region}:${aws:accountId}:parameter/voicecert/prod/firebase_service_account
+        - Effect: Allow
+          Action:
+            - ses:SendEmail
+            - ses:SendRawEmail
+          Resource: "*"
+        - Effect: Allow
+          Action:
+            - s3:PutObject
+            - s3:GetObject
+            - s3:PutObjectAcl
+          Resource: "arn:aws:s3:::www.voicecert.com/*"
+        - Effect: Allow
+          Action:
+            - s3:PutObject
+            - s3:GetObject
+            - s3:PutObjectAcl
+          Resource: "arn:aws:s3:::voicecert-mail-inbox/*"
+        - Effect: Allow
+          Action:
+            - s3:ListBucket
+          Resource: "arn:aws:s3:::www.voicecert.com"
+  apiGateway:
+    shouldStartNameWithService: true
+    apiKeys: []  # Disable API key requirement
+    minimumCompressionSize: 1024
+    binaryMediaTypes:
+      - '*/*'
+
+functions:
+  api:
+    handler: api/api.handler
+    environment:
+      FIREBASE_DATABASE_URL: ${ssm:/voicecert/prod/firebase_database_url}
+    events:
+      - http:
+          path: api/{proxy+}  # Wildcard path that matches api/* 
+          method: ANY        # Allows all HTTP methods
+          cors: true
+          private: false        # Ensure endpoint is public
+          authorizer: null     # Disable AWS authorizer
+          authentication: null # Disable AWS authentication
+resources:
+  Resources:
+    LambdaPermissionSES:
+      Type: AWS::Lambda::Permission
+      Properties:
+        FunctionName: !GetAtt ApiLambdaFunction.Arn
+        Action: lambda:InvokeFunction
+        Principal: ses.amazonaws.com
+        SourceAccount: !Ref AWS::AccountId
+        SourceArn: "arn:aws:ses:us-east-1:218827615080:receipt-rule-set/forwardallemails:receipt-rule/voicecert-email-lambda"
+    S3DataEvents:
+      Type: AWS::CloudTrail::Trail
+      Properties:
+        IsLogging: true
+        S3BucketName: www.voicecert.com-logs
+        TrailName: voicecert-s3-trail
+        EnableLogFileValidation: true
+        IncludeGlobalServiceEvents: true
+        IsMultiRegionTrail: false
+        EventSelectors:
+          - DataResources:
+              - Type: AWS::S3::Object
+                Values:
+                  - !Sub arn:aws:s3:::www.voicecert.com/
+        S3KeyPrefix: cloudtrail-logs
+    
+    # S3 Bucket Policy for SES
+    VoiceCertMailInboxPolicy:
+      Type: AWS::S3::BucketPolicy
+      Properties:
+        Bucket: voicecert-mail-inbox
+        PolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+            - Sid: AllowSESToWrite
+              Effect: Allow
+              Principal:
+                Service: ses.amazonaws.com
+              Action:
+                - s3:PutObject
+              Resource: !Sub arn:aws:s3:::voicecert-mail-inbox/*
+              Condition:
+                StringEquals:
+                  aws:Referer: !Ref AWS::AccountId

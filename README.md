@@ -1,6 +1,6 @@
 # 🚀 VCMail
 
-> **Open Source Email Server combined with on-device LLM with end-to-end encryption so no identity/email provider can see your email or train on it's data.**
+> **Open Source Email Server providing webmail with on-device LLM and end-to-end encryption so no identity/email provider can see your email or train on it's data.**
 
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
@@ -14,7 +14,7 @@
 
 VCMail was created while working on Voice Cert technologies, the VC stands for that. But it may also be a great way to communicate over email to Venture Capitalists when starting new companies, showing your expertise along with being security-conscious.
 
-Emails will include the voicecert image to verify identity and allow a link to decrypt the email, such that **NO mail provider or man in the middle is possible**.
+Emails will include the voicecert image to verify identity and allow a link to decrypt the email, such that **NO mail provider snooping or man in the middle is possible**.
 
 > ⚠️ **Security Warning**: No other email servers are safe to put passwords in because emails are not inherently secure and can be intercepted, hacked, or sent to the wrong person. Company ideas and secrets you might put in email are vulnerable - Google and other companies have AI training on your email data!
 
