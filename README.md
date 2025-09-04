@@ -50,7 +50,7 @@ Want more advanced features? Create a free tier Oracle server and run the `serve
 
 **Yesterday**: You sent Steve a message on WhatsApp discussing how your company handles X.
 
-**Today**: Jill is asking about how to handle X.
+**Today**: Jill emails you, asking about how to handle X.
 
 **AI Magic**: The AI automatically:
 - Gets metadata on X to know you had a conversation with Steve about it by using [![WhatsApp MCP](https://img.shields.io/badge/WhatsApp-MCP%20Server-green.svg?logo=whatsapp)](https://github.com/lharries/whatsapp-mcp)
@@ -63,6 +63,7 @@ Want more advanced features? Create a free tier Oracle server and run the `serve
   - Whether Jill and Steve work at the same company or your company
   - If this is internal communication
   - Allows 'share with internal' tagged emails to be linked to/seen by Jill when she's at the same company as you.
+  - Ensures Jill is the only one able to read the email or the content it links to.
 
 ---
 
@@ -70,13 +71,13 @@ Want more advanced features? Create a free tier Oracle server and run the `serve
 
 ### Prerequisites
 - AWS Account
-- Firebase Project
 - Domain Name
 
 ### Installation
 
 1. **Set up Firebase Realtime Database And Service Account**   
    ## Create a new firebase project for [yourdomain]email
+   ## setup the realtime database for that project and create a service account.
    ## Then - in your [![AWS application parameters]](https://console.aws.amazon.com/systems-manager/parameters), create:
    /voicecert/prod/firebase_service_account
    
@@ -133,7 +134,7 @@ For Outlook integration and enterprise features:
 - **VoiceCert identity verification** with cryptographic signatures
 - **Data sovereignty** - your data stays on your infrastructure
 - **No third-party AI training** on your email content
-- **Government-proof** communication channels
+- **Government-proof** communication channels. Only sender and recevier can see contents. Not even voicecert can know them.
 
 ---
 
@@ -175,9 +176,9 @@ This project is licensed under the Apache 2.0 License - see the [LICENSE](LICENS
 
 ## 📞 Support
 
-- **Issues**: [GitHub Issues](https://github.com/yourusername/VCMail/issues)
-- **Discussions**: [GitHub Discussions](https://github.com/yourusername/VCMail/discussions)
-- **Wiki**: [Project Wiki](https://github.com/yourusername/VCMail/wiki)
+- **Issues**: [GitHub Issues](https://github.com/oceanseth/VCMail/issues)
+- **Discussions**: [GitHub Discussions](https://github.com/oceanseth/VCMail/discussions)
+- **Wiki**: [Project Wiki](https://github.com/oceanseth/VCMail/wiki)
 
 ---
 
@@ -185,7 +186,7 @@ This project is licensed under the Apache 2.0 License - see the [LICENSE](LICENS
 
 **Made with ❤️ for secure email communication**
 
-[![Star](https://img.shields.io/github/stars/yourusername/VCMail?style=social)](https://github.com/yourusername/VCMail)
-[![Fork](https://img.shields.io/github/forks/yourusername/VCMail?style=social)](https://github.com/yourusername/VCMail)
+[![Star](https://img.shields.io/github/stars/oceanseth/VCMail?style=social)](https://github.com/oceanseth/VCMail)
+[![Fork](https://img.shields.io/github/forks/oceanseth/VCMail?style=social)](https://github.com/oceanseth/VCMail)
 
 </div>
