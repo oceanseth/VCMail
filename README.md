@@ -1,20 +1,24 @@
 # 🚀 VCMail
 
-> **Open Source Email Server Setup for new companies, combined with on-device LLM providing summaries, and suggestions.**
+> **Open Source Email Server combined with on-device LLM with end-to-end encryption so no identity/email provider can see your email or train on it's data.**
 
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-[![Firebase](https://img.shields.io/badge/Firebase-Realtime%20Database-orange.svg)](https://firebase.google.com/)
-[![AWS](https://img.shields.io/badge/AWS-Lambda%20%7C%20S3-yellow.svg)](https://aws.amazon.com/)
-[![AI](https://img.shields.io/badge/AI-LLM%20Integration-purple.svg)](https://webllm.mlc.ai/)
-[![Oracle](https://img.shields.io/badge/Oracle%20Cloud-F80000?style=flat&logo=Oracle&logoColor=white)](https://signup.cloud.oracle.com/)
+
+[![Firebase](https://img.shields.io/badge/Firebase-Realtime%20Database-orange.svg)](https://firebase.google.com/) for storing and sending realtime emails, notifications, etc.
+
+[![AWS](https://img.shields.io/badge/AWS-Lambda%20%7C%20S3-yellow.svg)](https://aws.amazon.com/) for long term storage and soc compliance to store the encrypted contents in a form retrievable in the future by sender/recipient private key holders.
+
+[![WebLLM](https://img.shields.io/badge/AI-LLM%20Integration-purple.svg)](https://webllm.mlc.ai/) On-device llm, you can provide and train your own model if you wish, it runs in your browser, since you are the only one decrypting emails.
+
+[![Oracle](https://img.shields.io/badge/Oracle%20Cloud-F80000?style=flat&logo=Oracle&logoColor=white)](https://signup.cloud.oracle.com/) - for a FREE imap/smtp server that handles the requirements of most small companies. Not required, can function soley with webmail client.
 
 VCMail was created while working on Voice Cert technologies, the VC stands for that. But it may also be a great way to communicate over email to Venture Capitalists when starting new companies, showing your expertise along with being security-conscious.
 
 Emails will include the voicecert image to verify identity and allow a link to decrypt the email, such that **NO mail provider or man in the middle is possible**.
 
-> ⚠️ **Security Warning**: Generally, it is not safe to put passwords in an email because emails are not inherently secure and can be intercepted, hacked, or sent to the wrong person. Company ideas and secrets you might put in email are vulnerable - Google and other companies have AI training on your email data!
+> ⚠️ **Security Warning**: No other email servers are safe to put passwords in because emails are not inherently secure and can be intercepted, hacked, or sent to the wrong person. Company ideas and secrets you might put in email are vulnerable - Google and other companies have AI training on your email data!
 
-VCMail provides **data sovereignty** - only your own infra will be able to train on your email data. And since the receiving party has to go through an external link and decryption step, even sending emails to Gmail will not allow Google to train on your emails, nor governments to spy on it.
+VCMail provides both security and **data sovereignty** - only your own infra will be able to train on your email data. And since the receiving party has to go through an external link and decryption step, even sending emails to Gmail will not allow Google to train on your emails, nor governments to spy on it. Only the recipient with approved identity providers will be able to read the contents. And if multiple providers are used, no single provider will be able to read the contents. This means even google cannot know the contents of the email despite sending over gmail! 
 
 ---
 
@@ -58,7 +62,7 @@ Want more advanced features? Create a free tier Oracle server and run the `serve
   - The date of your conversation with Steve
   - Whether Jill and Steve work at the same company or your company
   - If this is internal communication
-  - Allows 'share with internal' tagged emails to be seen by Jill
+  - Allows 'share with internal' tagged emails to be linked to/seen by Jill when she's at the same company as you.
 
 ---
 
@@ -71,13 +75,11 @@ Want more advanced features? Create a free tier Oracle server and run the `serve
 
 ### Installation
 
-1. **Set up Firebase Service Account**
-   ```bash
-   # In your AWS application parameters, create:
+1. **Set up Firebase Realtime Database And Service Account**   
+   ## Create a new firebase project for [yourdomain]email
+   ## Then - in your [![AWS application parameters]](https://console.aws.amazon.com/systems-manager/parameters), create:
    /voicecert/prod/firebase_service_account
-   ```
    
-   > 🔒 **Security Tip**: For maximum security, set this to a service account that only has authority over `/users`, `/emails`, and `/sent`
 
 2. **Clone the Repository**
    ```bash
@@ -159,7 +161,7 @@ git push origin feature/amazing-feature
 
 ## 📄 License
 
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+This project is licensed under the Apache 2.0 License - see the [LICENSE](LICENSE) file for details.
 
 ---
 
