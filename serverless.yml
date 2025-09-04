@@ -45,7 +45,7 @@ functions:
   api:
     handler: api/api.handler
     environment:
-      FIREBASE_DATABASE_URL: ${ssm:/voicecert/prod/firebase_database_url}
+      FIREBASE_CONFIG: ${ssm:/voicecert/prod/firebase_config}
     events:
       - http:
           path: api/{proxy+}  # Wildcard path that matches api/* 

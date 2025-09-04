@@ -4,13 +4,15 @@ const s3 = new AWS.S3({
     signatureVersion: 'v4',
     endpoint: 'https://s3.us-east-1.amazonaws.com'  // Specify regional endpoint
 });
+const firebaseConfig = JSON.parse(process.env.FIREBASE_CONFIG);
 const firebaseInitializer = require('../firebaseInit');
+
 
 let firebaseApp;
 
 exports.handler = async (event, context) => {
     //console.log('Lambda started - full event:', JSON.stringify(event, null, 2));
-    firebaseApp = await firebaseInitializer.get(process.env.FIREBASE_DATABASE_URL);
+    firebaseApp = await firebaseInitializer.get(firebaseConfig.databaseURL);
     if (event.Records && event.Records[0].eventSource === 'aws:ses') {
         return await handleSesEvent(event);
     }

@@ -1,0 +1,59 @@
+{
+  "name": "vcmail-mail-server",
+  "version": "1.0.0",
+  "description": "VCMail Custom IMAP/SMTP Server with Firebase Integration",
+  "main": "vcmail-imap-smtp-server.js",
+  "scripts": {
+    "start": "node vcmail-imap-smtp-server.js",
+    "dev": "nodemon vcmail-imap-smtp-server.js",
+    "test": "jest",
+    "lint": "eslint .",
+    "lint:fix": "eslint . --fix"
+  },
+  "keywords": [
+    "imap",
+    "smtp",
+    "email",
+    "firebase",
+    "mail-server",
+    "vcmail"
+  ],
+  "author": "VCMail Team",
+  "license": "MIT",
+  "dependencies": {
+    "express": "^4.18.2",
+    "smtp-server": "^3.12.0",
+    "imapflow": "^1.0.161",
+    "firebase-admin": "^11.11.0",
+    "mysql2": "^3.6.5",
+    "redis": "^4.6.10",
+    "cors": "^2.8.5",
+    "helmet": "^7.1.0",
+    "morgan": "^1.10.0",
+    "winston": "^3.11.0",
+    "node-cron": "^3.0.3",
+    "mailparser": "^3.6.5",
+    "nodemailer": "^6.9.7",
+    "bcryptjs": "^2.4.3",
+    "jsonwebtoken": "^9.0.2",
+    "ssl-cert": "^0.1.0",
+    "dotenv": "^16.3.1"
+  },
+  "devDependencies": {
+    "nodemon": "^3.0.2",
+    "jest": "^29.7.0",
+    "eslint": "^8.55.0",
+    "supertest": "^6.3.3"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/yourusername/VCMail.git"
+  },
+  "bugs": {
+    "url": "https://github.com/yourusername/VCMail/issues"
+  },
+  "homepage": "https://github.com/yourusername/VCMail#readme"
+}
