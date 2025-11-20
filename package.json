@@ -1,0 +1,59 @@
+{
+  "name": "vcmail",
+  "version": "1.0.0",
+  "description": "Standalone email server setup with AWS and Firebase. Run 'npm run vcmail' to set up your mail server infrastructure.",
+  "main": "lib/setup.js",
+  "bin": {
+    "vcmail": "./bin/vcmail.js"
+  },
+  "scripts": {
+    "vcmail": "node bin/vcmail.js",
+    "deploy-rules": "node scripts/deploy-database-rules.js"
+  },
+  "dependencies": {
+    "aws-sdk": "^2.1531.0",
+    "chalk": "^4.1.2",
+    "dotenv": "^16.3.1",
+    "execa": "^5.1.1",
+    "firebase-admin": "^11.11.0",
+    "fs-extra": "^11.1.1",
+    "inquirer": "^9.2.12",
+    "ora": "^5.4.1"
+  },
+  "devDependencies": {
+    "@types/node": "^20.10.0",
+    "serverless-plugin-include-dependencies": "^6.1.1"
+  },
+  "keywords": [
+    "email",
+    "mail-server",
+    "aws",
+    "terraform",
+    "firebase",
+    "ses",
+    "route53",
+    "lambda",
+    "webmail",
+    "vcmail",
+    "email-infrastructure"
+  ],
+  "author": "VCMail Team",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/oceanseth/VCMail.git"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "files": [
+    "bin/",
+    "lib/",
+    "templates/",
+    "api/",
+    "src/",
+    "index.html",
+    "README.md",
+    "LICENSE"
+  ]
+}

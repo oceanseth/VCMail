@@ -1,8 +1,33 @@
 const AWS = require('aws-sdk');
+const path = require('path');
+
+// Load configuration from environment variables or config file
+let config = {};
+try {
+    // Try to load from environment variables first (for Lambda)
+    if (process.env.VCMAIL_CONFIG) {
+        config = JSON.parse(process.env.VCMAIL_CONFIG);
+    } else {
+        // Fallback to config file (for local development)
+        const { loadConfig } = require('../lib/config');
+        config = loadConfig(process.cwd());
+    }
+} catch (error) {
+    console.warn('Could not load VCMail config, using defaults:', error.message);
+    // Use sensible defaults if config not available
+    config = {
+        domain: process.env.DOMAIN || 'example.com',
+        emailDomain: process.env.EMAIL_DOMAIN || process.env.DOMAIN || 'example.com',
+        s3BucketName: process.env.S3_BUCKET_NAME || 'vcmail-mail-inbox',
+        ssmPrefix: process.env.SSM_PREFIX || '/vcmail/prod',
+        awsRegion: process.env.AWS_REGION || 'us-east-1'
+    };
+}
+
 const s3 = new AWS.S3({
-    region: 'us-east-1',
+    region: config.awsRegion || process.env.AWS_REGION || 'us-east-1',
     signatureVersion: 'v4',
-    endpoint: 'https://s3.us-east-1.amazonaws.com'  // Specify regional endpoint
+    endpoint: `https://s3.${config.awsRegion || process.env.AWS_REGION || 'us-east-1'}.amazonaws.com`
 });
 const firebaseConfig = JSON.parse(process.env.FIREBASE_CONFIG);
 const firebaseInitializer = require('../firebaseInit');
@@ -17,6 +42,14 @@ exports.handler = async (event, context) => {
         return await handleSesEvent(event);
     }
     
+    const corsHeaders = {
+        'Access-Control-Allow-Origin': '*',
+        'Access-Control-Allow-Methods': 'GET,POST,PUT,DELETE,OPTIONS',
+        'Access-Control-Allow-Headers': 'Content-Type,Authorization,X-Requested-With',
+        'Access-Control-Max-Age': '86400',
+        'Access-Control-Allow-Credentials': 'false'
+    };
+    
     const headers = {
         'Access-Control-Allow-Origin': '*',
         'Access-Control-Allow-Methods': 'GET,POST,PUT,DELETE,OPTIONS',
@@ -24,21 +57,34 @@ exports.handler = async (event, context) => {
         'Access-Control-Max-Age': '86400'
     };
 
-    // Handle OPTIONS requests for CORS
-    if (event.httpMethod === 'OPTIONS') {
+    // Handle OPTIONS requests for CORS (check multiple possible event formats)
+    const httpMethod = event.httpMethod || 
+                       event.requestContext?.http?.method || 
+                       event.requestContext?.httpMethod ||
+                       (event.requestContext?.routeKey?.includes('OPTIONS') ? 'OPTIONS' : null);
+    
+    if (httpMethod === 'OPTIONS') {
         console.log('Handling OPTIONS request for CORS');
+        console.log('Event structure:', {
+            httpMethod: event.httpMethod,
+            requestContext: event.requestContext,
+            headers: event.headers
+        });
         return {
             statusCode: 200,
-            headers: {
-                'Access-Control-Allow-Origin': '*',
-                'Access-Control-Allow-Methods': 'GET,POST,PUT,DELETE,OPTIONS',
-                'Access-Control-Allow-Headers': 'Content-Type,Authorization,X-Requested-With',
-                'Access-Control-Max-Age': '86400',
-                'Access-Control-Allow-Credentials': 'false'
-            },
+            headers: corsHeaders,
             body: ''
         };
     }
+    
+    // Helper function to get Authorization header (case-insensitive)
+    const getAuthToken = () => {
+        const authHeader = event.headers?.Authorization || 
+                          event.headers?.authorization ||
+                          event.headers?.['authorization'] ||
+                          event.headers?.['Authorization'];
+        return authHeader?.split(' ')[1];
+    };
 
     try {
         console.log('Full event:', JSON.stringify(event, null, 2));
@@ -56,31 +102,73 @@ exports.handler = async (event, context) => {
 
         switch (path) {
             case 'upload':
-                const token = event.headers?.Authorization?.split(' ')[1];
+                const token = getAuthToken();
+                if (!token) {
+                    return {
+                        statusCode: 401,
+                        headers,
+                        body: JSON.stringify({ error: 'Authorization token required' })
+                    };
+                }
                 const decodedToken = await firebaseApp.auth().verifyIdToken(token);
                 return await handleUpload(event, decodedToken.uid, headers);
             case 'setupEmail':
-                const setupToken = event.headers?.Authorization?.split(' ')[1];
+                const setupToken = getAuthToken();
+                if (!setupToken) {
+                    return {
+                        statusCode: 401,
+                        headers,
+                        body: JSON.stringify({ error: 'Authorization token required' })
+                    };
+                }
                 const setupDecodedToken = await firebaseApp.auth().verifyIdToken(setupToken);
                 return await handleSetupEmail(event, setupDecodedToken, headers);
             
             case 'getEmails':
-                const emailToken = event.headers?.Authorization?.split(' ')[1];
+                const emailToken = getAuthToken();
+                if (!emailToken) {
+                    return {
+                        statusCode: 401,
+                        headers,
+                        body: JSON.stringify({ error: 'Authorization token required' })
+                    };
+                }
                 const emailDecodedToken = await firebaseApp.auth().verifyIdToken(emailToken);
                 return await handleGetEmails(event, emailDecodedToken.uid, headers);
             
             case 'getEmailStats':
-                const statsToken = event.headers?.Authorization?.split(' ')[1];
+                const statsToken = getAuthToken();
+                if (!statsToken) {
+                    return {
+                        statusCode: 401,
+                        headers,
+                        body: JSON.stringify({ error: 'Authorization token required' })
+                    };
+                }
                 const statsDecodedToken = await firebaseApp.auth().verifyIdToken(statsToken);
                 return await handleGetEmailStats(event, statsDecodedToken.uid, headers);
             
             case 'sendEmail':
-                const sendToken = event.headers?.Authorization?.split(' ')[1];
+                const sendToken = getAuthToken();
+                if (!sendToken) {
+                    return {
+                        statusCode: 401,
+                        headers,
+                        body: JSON.stringify({ error: 'Authorization token required' })
+                    };
+                }
                 const sendDecodedToken = await firebaseApp.auth().verifyIdToken(sendToken);
                 return await handleSendEmail(event, sendDecodedToken, headers);
             
             case 'deleteEmail':
-                const deleteToken = event.headers?.Authorization?.split(' ')[1];
+                const deleteToken = getAuthToken();
+                if (!deleteToken) {
+                    return {
+                        statusCode: 401,
+                        headers,
+                        body: JSON.stringify({ error: 'Authorization token required' })
+                    };
+                }
                 const deleteDecodedToken = await firebaseApp.auth().verifyIdToken(deleteToken);
                 return await handleDeleteEmail(event, deleteDecodedToken.uid, headers);
             
@@ -125,7 +213,7 @@ async function handleSesEvent(event) {
                 console.log('✅ Found messageId:', ses.mail.messageId);
                 
                 const s3Key = ses.mail.messageId;
-                const bucketName = 'voicecert-mail-inbox';
+                const bucketName = config.s3BucketName || process.env.S3_BUCKET_NAME || 'vcmail-mail-inbox';
                 
                 console.log(`📦 Reading email from S3: s3://${bucketName}/${s3Key}`);
                 
@@ -169,16 +257,17 @@ async function handleSesEvent(event) {
                     console.log('Parsed email data:', JSON.stringify(emailData, null, 2));
                     
                     // Process each recipient
+                    const emailDomain = config.emailDomain || config.domain || 'example.com';
                     console.log('Processing recipients:', ses.mail.destination);
                     for (const recipient of ses.mail.destination) {
                         console.log('Checking recipient:', recipient);
-                        if (recipient.endsWith('@voicecert.com')) {
+                        if (recipient.endsWith(`@${emailDomain}`)) {
                             const username = recipient.split('@')[0];
-                            console.log('✅ Found @voicecert.com recipient:', username);
+                            console.log(`✅ Found @${emailDomain} recipient:`, username);
                             await storeEmailForUser(username, ses.mail.messageId, emailData);
                             processedCount++;
                         } else {
-                            console.log('❌ Recipient not @voicecert.com:', recipient);
+                            console.log(`❌ Recipient not @${emailDomain}:`, recipient);
                         }
                     }
                 } catch (s3Error) {
@@ -767,9 +856,11 @@ async function handleUpload(event, userId, headers) {
     const timestamp = Date.now();
     const fileExtension = getFileExtension(contentType);
     const filename = `challenges/${userId}/${challengeId}/${timestamp}${fileExtension}`;
+    
+    const webmailBucket = config.s3WebmailBucket || config.mailDomain || 'mail.example.com';
 
     console.log('Generating presigned URL with params:', {
-        Bucket: 'www.voicecert.com',
+        Bucket: webmailBucket,
         Key: filename,
         ContentType: contentType,
         Expires: 300
@@ -777,7 +868,7 @@ async function handleUpload(event, userId, headers) {
 
     // Generate presigned URL for upload
     const presignedUrl = await s3.getSignedUrlPromise('putObject', {
-        Bucket: 'www.voicecert.com',
+        Bucket: webmailBucket,
         Key: filename,
         ContentType: contentType,
         Expires: 300
@@ -786,12 +877,16 @@ async function handleUpload(event, userId, headers) {
     console.log('Generated presigned URL:', presignedUrl);
 
     // Return the upload URL and the final file URL
+    const fileUrl = config.apiEndpoint 
+        ? `${config.apiEndpoint}/${filename}`
+        : `https://${webmailBucket}/${filename}`;
+    
     return {
         statusCode: 200,
         headers,
         body: JSON.stringify({
             uploadUrl: presignedUrl,
-            fileUrl: `https://www.voicecert.com/${filename}`
+            fileUrl: fileUrl
         })
     };
 }
@@ -805,6 +900,30 @@ function getFileExtension(mimeType) {
         'video/mp4': '.mp4'
     };
     return mimeToExt[mimeType] || '';
+}
+
+// Helper functions to encode/decode email addresses for Firebase paths
+// Firebase Realtime Database doesn't allow '.', '#', '$', '[', ']' in path segments
+function encodeEmailForFirebase(email) {
+    if (!email) return email;
+    return email
+        .replace(/\./g, '_dot_')
+        .replace(/#/g, '_hash_')
+        .replace(/\$/g, '_dollar_')
+        .replace(/\[/g, '_lbracket_')
+        .replace(/\]/g, '_rbracket_')
+        .replace(/@/g, '_at_');
+}
+
+function decodeEmailFromFirebase(encodedEmail) {
+    if (!encodedEmail) return encodedEmail;
+    return encodedEmail
+        .replace(/_at_/g, '@')
+        .replace(/_rbracket_/g, ']')
+        .replace(/_lbracket_/g, '[')
+        .replace(/_dollar_/g, '$')
+        .replace(/_hash_/g, '#')
+        .replace(/_dot_/g, '.');
 }
 
 async function handleSetupEmail(event, decodedToken, headers) {
@@ -823,11 +942,8 @@ async function handleSetupEmail(event, decodedToken, headers) {
             };
         }
 
-        const { username } = body;
-        const uid = decodedToken.uid;
-        const email = `${username}@voicecert.com`;
-
-        if (!username) {
+        let { username } = body;
+        if (typeof username !== 'string') {
             return {
                 statusCode: 400,
                 headers,
@@ -835,23 +951,62 @@ async function handleSetupEmail(event, decodedToken, headers) {
             };
         }
 
-        // Check if this email is already mapped to another user
-        const existingRef = firebaseApp.database().ref(`userEmails/${email}`);
-        const existingSnapshot = await existingRef.once('value');
+        username = username.trim().toLowerCase();
+        if (!username.match(/^[a-zA-Z0-9._-]{3,32}$/)) {
+            return {
+                statusCode: 400,
+                headers,
+                body: JSON.stringify({ error: 'Username must be 3-32 characters and can only contain letters, numbers, dots, underscores, or hyphens.' })
+            };
+        }
+
+        const uid = decodedToken.uid;
+        const emailDomain = config.emailDomain || config.domain || 'example.com';
+        const email = `${username}@${emailDomain}`;
+        const db = firebaseApp.database();
         
-        if (existingSnapshot.exists()) {
-            const existingData = existingSnapshot.val();
-            if (existingData.uid !== uid) {
-                return {
-                    statusCode: 409,
-                    headers,
-                    body: JSON.stringify({ error: 'Email already mapped to another user' })
-                };
+        // Encode email for use in Firebase path (replaces invalid characters)
+        const encodedEmail = encodeEmailForFirebase(email);
+
+        const [usernameSnapshot, profileSnapshot, emailSnapshot] = await Promise.all([
+            db.ref(`usernames/${username}`).once('value'),
+            db.ref(`users/${uid}/profile`).once('value'),
+            db.ref(`userEmails/${encodedEmail}`).once('value')
+        ]);
+
+        if (usernameSnapshot.exists() && usernameSnapshot.val() !== uid) {
+            return {
+                statusCode: 409,
+                headers,
+                body: JSON.stringify({ error: 'Username already taken. Please choose another.' })
+            };
+        }
+
+        if (emailSnapshot.exists() && emailSnapshot.val().uid !== uid) {
+            return {
+                statusCode: 409,
+                headers,
+                body: JSON.stringify({ error: 'Email already mapped to another user' })
+            };
+        }
+
+        const existingProfile = profileSnapshot.exists() ? profileSnapshot.val() : null;
+        const updates = {};
+
+        if (existingProfile?.username && existingProfile.username !== username) {
+            updates[`usernames/${existingProfile.username}`] = null;
+            if (existingProfile.email) {
+                // Encode the existing email for Firebase path
+                const encodedExistingEmail = encodeEmailForFirebase(existingProfile.email);
+                updates[`userEmails/${encodedExistingEmail}`] = null;
             }
         }
 
-        // Store the email mapping
-        await existingRef.set({ uid: uid });
+        updates[`usernames/${username}`] = uid;
+        updates[`users/${uid}/profile`] = { username, email };
+        updates[`userEmails/${encodedEmail}`] = { uid };
+
+        await db.ref().update(updates);
 
         return {
             statusCode: 200,
@@ -1047,10 +1202,12 @@ async function handleSendEmail(event, decodedToken, headers) {
         }
 
         const senderUsername = profileSnapshot.val().username;
-        const senderEmail = `${senderUsername}@voicecert.com`;
+        const emailDomain = config.emailDomain || config.domain || 'example.com';
+        const senderEmail = `${senderUsername}@${emailDomain}`;
 
         // Send email via SES
-        const ses = new AWS.SES({ region: 'us-east-1' });
+        const sesRegion = config.awsRegion || process.env.AWS_REGION || 'us-east-1';
+        const ses = new AWS.SES({ region: sesRegion });
         
         const emailParams = {
             Source: senderEmail,

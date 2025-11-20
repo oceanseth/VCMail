@@ -1,0 +1,137 @@
+service: ${PROJECT_NAME}
+
+provider:
+  name: aws
+  runtime: nodejs18.x
+  stage: ${opt:stage, 'prod'}
+  region: ${AWS_REGION}
+  iam:
+    role:
+      statements:
+        - Effect: Allow
+          Action:
+            - ssm:GetParameter
+          Resource: 
+            - arn:aws:ssm:${AWS_REGION}:${AWS_ACCOUNT_ID}:parameter${SSM_PREFIX}/firebase_service_account
+        - Effect: Allow
+          Action:
+            - ses:SendEmail
+            - ses:SendRawEmail
+          Resource: "*"
+        - Effect: Allow
+          Action:
+            - s3:PutObject
+            - s3:GetObject
+            - s3:PutObjectAcl
+          Resource: "arn:aws:s3:::${S3_WEBMAIL_BUCKET}/*"
+        - Effect: Allow
+          Action:
+            - s3:PutObject
+            - s3:GetObject
+            - s3:PutObjectAcl
+          Resource: "arn:aws:s3:::${S3_BUCKET}/*"
+        - Effect: Allow
+          Action:
+            - s3:ListBucket
+          Resource: "arn:aws:s3:::${S3_WEBMAIL_BUCKET}"
+  apiGateway:
+    shouldStartNameWithService: true
+    apiKeys: []  # Disable API key requirement
+    minimumCompressionSize: 1024
+    binaryMediaTypes:
+      - '*/*'
+
+package:
+  individually: false
+  excludeDevDependencies: true
+  patterns:
+    # Strategy: Exclude all node_modules first, then include only what we need
+    # This avoids scanning thousands of files (EMFILE error on Windows)
+    - '!node_modules/**'
+    # Include firebase-admin and common Firebase/Google dependencies
+    - 'node_modules/firebase-admin/**'
+    - 'node_modules/@firebase/**'
+    - 'node_modules/@google-cloud/**'
+    - 'node_modules/@grpc/**'
+    - 'node_modules/google-auth-library/**'
+    - 'node_modules/google-gax/**'
+    - 'node_modules/protobufjs/**'
+    - 'node_modules/@protobufjs/**'
+    - 'node_modules/gtoken/**'
+    - 'node_modules/jwa/**'
+    - 'node_modules/jws/**'
+    - 'node_modules/lru-cache/**'
+    - 'node_modules/yallist/**'
+    - 'node_modules/jsonwebtoken/**'
+    - 'node_modules/axios/**'
+    - 'node_modules/follow-redirects/**'
+    # Exclude unnecessary files and directories
+    - '!.vcmail-terraform/**'
+    - '!vcmail-serverless.yml'
+    - '!vcmail.config.json'
+    - '!.git/**'
+    - '!.vscode/**'
+    - '!.idea/**'
+    - '!.gitignore'
+    - '!*.md'
+    - '!*.txt'
+    - '!*.log'
+    - '!*.test.js'
+    - '!*.spec.js'
+    - '!.terraform/**'
+    - '!terraform.tfstate*'
+    - '!tfplan'
+    - '!terraform.tfvars'
+    - '!example.vcmail.config.json'
+    - '!lib/**'
+    - '!bin/**'
+    - '!templates/**'
+    - '!scripts/**'
+    - '!mail-server/**'
+    - '!terraform/**'
+    - '!*.sh'
+    - '!*.json.example'
+    - '!example.*'
+    # Exclude test files from node_modules
+    - '!node_modules/**/test/**'
+    - '!node_modules/**/tests/**'
+    - '!node_modules/**/*.test.js'
+    - '!node_modules/**/*.spec.js'
+    - '!node_modules/**/*.md'
+    - '!node_modules/**/*.txt'
+    # Include only what Lambda needs
+    - 'api/**'
+    - 'src/**'
+    - 'lib/config.js'
+    - 'firebaseInit.js'
+    - 'package.json'
+    - 'package-lock.json'
+
+functions:
+  api:
+    handler: api/api.handler
+    environment:
+      FIREBASE_CONFIG: ${ssm:${SSM_PREFIX}/firebase_service_account}
+    events:
+      - http:
+          path: api/{proxy+}  # Wildcard path that matches api/* 
+          method: ANY        # Allows all HTTP methods
+          cors: true
+          private: false        # Ensure endpoint is public
+          authorizer: null     # Disable AWS authorizer
+          authentication: null # Disable AWS authentication
+
+resources:
+  Resources:
+    LambdaPermissionSES:
+      Type: AWS::Lambda::Permission
+      Properties:
+        FunctionName: !GetAtt ApiLambdaFunction.Arn
+        Action: lambda:InvokeFunction
+        Principal: ses.amazonaws.com
+        SourceAccount: !Ref AWS::AccountId
+        SourceArn: "arn:aws:ses:${AWS_REGION}:${AWS_ACCOUNT_ID}:receipt-rule-set/${PROJECT_NAME}-incoming-email:receipt-rule/${PROJECT_NAME}-email-rule"
+    
+    # Note: S3 Bucket Policy is managed by Terraform, not Serverless Framework
+    # This avoids conflicts when both tools try to manage the same resource
+

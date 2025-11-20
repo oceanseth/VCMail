@@ -1,0 +1,61 @@
+# Dependencies - will be installed in Lambda
+node_modules/**
+
+# Development files
+.git/**
+.vscode/**
+.idea/**
+*.log
+*.test.js
+*.spec.js
+
+# Scripts and tools
+scripts/**
+bin/**
+lib/**
+templates/**
+mail-server/**
+terraform/**
+
+# Documentation
+*.md
+*.txt
+README.md
+LICENSE
+DEPLOYMENT_GUIDE.md
+CONFIG_CHANGES_SUMMARY.md
+HARDCODED_VALUES_REMOVED.md
+NPM_PACKAGE_PLAN.md
+NPM_PACKAGE_SUMMARY.md
+
+# Config examples
+*.example
+example.*
+*.config.json.example
+
+# Shell scripts
+*.sh
+
+# Build artifacts
+.serverless/**
+dist/**
+build/**
+
+# Environment files
+.env
+.env.*
+
+# IDE files
+*.swp
+*.swo
+.DS_Store
+
+# Database rules (not needed in Lambda)
+database.rules.json
+
+# DNS scripts
+dns-commands.sh
+oracle-mail-server-setup.sh
+oracle-pop3-setup.sh
+
+

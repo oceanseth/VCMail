@@ -3,7 +3,27 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>VoiceCert Email</title>
+  <title>VCMail Email</title>
+  <script>
+    // VCMail configuration will be injected here during deployment
+    // This is populated from vcmail.config.json by the setup process
+    window.VCMAIL_CONFIG = window.VCMAIL_CONFIG || {
+      domain: "example.com",
+      emailDomain: "example.com",
+      mailDomain: "mail.example.com",
+      apiEndpoint: "https://api.example.com",
+      storageCacheKey: "vcmail_email_cache",
+      firebase: {
+        apiKey: "your-api-key",
+        authDomain: "your-project.firebaseapp.com",
+        databaseURL: "https://your-project.firebaseio.com",
+        projectId: "your-project-id",
+        storageBucket: "your-project.appspot.com",
+        messagingSenderId: "123456789",
+        appId: "your-app-id"
+      }
+    };
+  </script>
   <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Inter:400,600&display=swap">
   <style>
     body { 
@@ -629,7 +649,7 @@
   <div id="app">
     <!-- Sign In Section -->
     <section id="signin-section" class="hidden">
-      <h1 class="center">VoiceCert Email</h1>
+      <h1 class="center">VCMail Email</h1>
       <div class="auth-container">
         <!-- Email/Password Form -->
         <form id="auth-form" class="auth-form">
@@ -677,10 +697,32 @@
 
     <!-- Setup Section -->
     <section id="setup-section" class="hidden">
-      <h1>Set up your VoiceCert Email</h1>
+      <h1 id="setup-heading">Set up your Email</h1>
       <form id="setup-form">
-        <label>Choose your username (for <b>@voicecert.com</b>):</label>
-        <input class="input" id="username-input" required pattern="^[a-zA-Z0-9._.-]{3,32}$" maxlength="32" placeholder="yourname" />
+        <label>Choose your username (for <b id="email-domain-display">@example.com</b>):</label>
+        <script>
+          // Update email domain display and heading
+          function updateEmailDomainDisplay() {
+            const emailDomain = window.VCMAIL_CONFIG?.emailDomain || window.VCMAIL_CONFIG?.domain || 'example.com';
+            const display = document.getElementById('email-domain-display');
+            const heading = document.getElementById('setup-heading');
+            if (display) {
+              display.textContent = `@${emailDomain}`;
+            }
+            if (heading) {
+              heading.textContent = `Set up your ${emailDomain} Email`;
+            }
+          }
+          // Run immediately if config is available, otherwise wait for DOMContentLoaded
+          if (document.readyState === 'loading') {
+            document.addEventListener('DOMContentLoaded', updateEmailDomainDisplay);
+          } else {
+            updateEmailDomainDisplay();
+          }
+          // Also run when config might become available later
+          document.addEventListener('DOMContentLoaded', updateEmailDomainDisplay);
+        </script>
+        <input class="input" id="username-input" required maxlength="32" placeholder="yourname" />
         <button class="btn" type="submit">Set Username</button>
       </form>
     </section>
@@ -749,7 +791,17 @@
       <h2>Compose Email</h2>
       <form id="compose-form">
         <label>To:</label>
-        <input class="input" id="to-input" required placeholder="recipient@voicecert.com" />
+        <input class="input" id="to-input" required placeholder="recipient@example.com" />
+        <script>
+          // Update placeholder
+          document.addEventListener('DOMContentLoaded', function() {
+            const emailDomain = window.VCMAIL_CONFIG?.emailDomain || window.VCMAIL_CONFIG?.domain || 'example.com';
+            const toInput = document.getElementById('to-input');
+            if (toInput) {
+              toInput.placeholder = `recipient@${emailDomain}`;
+            }
+          });
+        </script>
         <label>Subject:</label>
         <input class="input" id="subject-input" placeholder="Subject" />
         <label>Message:</label>

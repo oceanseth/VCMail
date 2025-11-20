@@ -1,12 +1,30 @@
 import { initializeApp } from "https://www.gstatic.com/firebasejs/9.23.0/firebase-app.js";
 import { getAuth, onAuthStateChanged, signInWithPopup, GoogleAuthProvider, signOut, createUserWithEmailAndPassword, signInWithEmailAndPassword, EmailAuthProvider } from "https://www.gstatic.com/firebasejs/9.23.0/firebase-auth.js";
 import { getDatabase, ref, get, set, push, query, orderByChild, limitToLast, startAfter, onValue, onChildAdded } from "https://www.gstatic.com/firebasejs/9.23.0/firebase-database.js";
+import { firebaseConfig, vcmailConfig } from "./firebaseConfig.js";
 
-const firebaseConfig = process.env.FIREBASE_CONFIG;
+// Get VCMail configuration from window object or use defaults
+const config = window.VCMAIL_CONFIG || vcmailConfig || {
+  domain: "example.com",
+  emailDomain: "example.com",
+  mailDomain: "mail.example.com",
+  apiEndpoint: "https://api.example.com",
+  storageCacheKey: "vcmail_email_cache",
+  buildId: "unknown"
+};
+
+// Log build ID and Firebase config for debugging
+console.log('📦 VCMail Build ID:', config.buildId || 'missing');
+console.log('🔧 Firebase Config:', {
+  projectId: firebaseConfig.projectId,
+  authDomain: firebaseConfig.authDomain,
+  apiKey: firebaseConfig.apiKey ? firebaseConfig.apiKey.substring(0, 10) + '...' : 'MISSING',
+  databaseURL: firebaseConfig.databaseURL
+});
+
 const app = initializeApp(firebaseConfig);
 const auth = getAuth(app);
 const db = getDatabase(app);
-
 
 // State management
 let currentUser = null;
@@ -25,7 +43,7 @@ let currentFolder = 'inbox'; // Track current folder (inbox or sent)
 class EmailCache {
   constructor(maxSize = 1000) {
     this.maxSize = maxSize;
-    this.storageKey = 'voicecert_email_cache';
+    this.storageKey = config.storageCacheKey || 'vcmail_email_cache';
     
     // Initialize from localStorage or create new
     this.loadFromStorage();
@@ -340,7 +358,7 @@ setInterval(() => {
 // Debug function to log cache stats
 function logCacheStats() {
   const stats = emailCache.getStats();
-  const storageSize = localStorage.getItem('voicecert_email_cache')?.length || 0;
+  const storageSize = localStorage.getItem(config.storageCacheKey || 'vcmail_email_cache')?.length || 0;
   console.log('📊 Cache Stats:', {
     inbox: {
       count: stats.inbox.count,
@@ -694,31 +712,51 @@ function showInboxView() {
   addScrollListener();
 }
 
-function extractAndDisplayEmailBody(rawContent) {
-  // Find the first boundary line (e.g., --000000000000f1680906396f5dd3)
-  const boundaryLine = (rawContent.match(/^--[^\r\n-]+/m) || [])[0];
-  if (boundaryLine) {
-    const boundary = boundaryLine.slice(2); // Remove the leading --
-    // Split the message by the boundary (ignore the final --boundary-- and empty parts)
-    const parts = rawContent.split(new RegExp(`--${boundary}(?:--)?[\r\n]+`));
-    let htmlPart = null, textPart = null;
-    for (const part of parts) {
-      const trimmed = part.trim();
-      if (!trimmed || trimmed === '--' || trimmed === '') continue; // skip empty or boundary-only parts
-      if (/Content-Type:\s*text\/html/i.test(part)) {
-        // Remove headers (up to first blank line)
-        const body = part.split(/\r?\n\r?\n/).slice(1).join('\n\n').trim();
-        if (body) htmlPart = body;
-      } else if (/Content-Type:\s*text\/plain/i.test(part)) {
-        const body = part.split(/\r?\n\r?\n/).slice(1).join('\n\n').trim();
-        if (body) textPart = body;
-      }
+function extractAndDisplayEmailBody(email) {
+  const rawContent = email.content;
+  const contentType = email.headers?.content_type;
+  
+    // Use DOMPurify to sanitize HTML and remove script tags
+   DOMPurify.sanitize(rawContent, {
+      ALLOWED_TAGS: ['p', 'br', 'div', 'span', 'strong', 'em', 'b', 'i', 'u', 'a', 'ul', 'ol', 'li', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'blockquote', 'pre', 'code', 'img'],
+      ALLOWED_ATTR: ['href', 'src', 'alt', 'title', 'class', 'style'],
+      ALLOW_DATA_ATTR: false
+    });
+    
+    if(contentType === 'text/html') {
+      return rawContent;
     }
-    if (htmlPart) return htmlPart;
-    if (textPart) return textPart.replace(/\r?\n/g, '<br>');
-  }
-  // Fallback: just show the whole thing as text
-  return rawContent.replace(/\r?\n/g, '<br>');
+  
+  // For all other content types (text/plain, etc.), format as plain text
+  return formatPlainTextAsHtml(rawContent);
+}
+
+// Helper function to format plain text with proper HTML spacing
+function formatPlainTextAsHtml(text) {
+  if (!text) return '';
+  
+  // Split into paragraphs (double line breaks)
+  const paragraphs = text.split(/\r?\n\s*\r?\n/);
+  
+  // Format each paragraph
+  const formattedParagraphs = paragraphs.map(paragraph => {
+    const trimmed = paragraph.trim();
+    if (!trimmed) return '';
+    
+    // Convert single line breaks within paragraphs to <br>
+    // But be more conservative - only convert if there are actual line breaks
+    const lines = trimmed.split(/\r?\n/);
+    if (lines.length === 1) {
+      // Single line, no need for <br>
+      return trimmed;
+    } else {
+      // Multiple lines, join with <br>
+      return lines.join('<br>');
+    }
+  }).filter(p => p.length > 0);
+  
+  // Wrap paragraphs in <p> tags
+  return formattedParagraphs.map(p => `<p>${p}</p>`).join('');
 }
 
 function showEmailView(email) {
@@ -781,7 +819,7 @@ function showEmailView(email) {
   
   // Add the main email content
   contentHtml += '<div class="email-body">';
-  contentHtml += extractAndDisplayEmailBody(email.content);
+  contentHtml += extractAndDisplayEmailBody(email);
   contentHtml += '</div>';
   
   emailContent.innerHTML = contentHtml;
@@ -852,29 +890,46 @@ function updateMessageCount() {
 async function setupUsername() {
   const uname = usernameInput.value.trim().toLowerCase();
   if (!uname.match(/^[a-zA-Z0-9._-]{3,32}$/)) {
-    alert('Invalid username.');
+    alert('Invalid username. Use 3-32 letters, numbers, dots, underscores or hyphens.');
+    return;
+  }
+  
+  if (!currentUser) {
+    alert('You must be signed in to set up a username.');
     return;
   }
   
   try {
-    // Check if username is already taken
-    const usernameSnap = await get(ref(db, `usernames/${uname}`));
-    if (usernameSnap.exists()) {
-      alert('Username already taken. Please choose another.');
-      return;
-    }
-    
-    // Save username mapping
-    await set(ref(db, `usernames/${uname}`), currentUser.uid);
-    // Also set in user profile for convenience
-    await set(ref(db, `users/${currentUser.uid}/profile`), { 
-      username: uname, 
-      email: `${uname}@voicecert.com` 
+    const idToken = await currentUser.getIdToken();
+    // Use relative URL - CloudFront will route /api/* to API Gateway
+    const apiEndpoint = config.apiEndpoint || '';
+    const response = await fetch(`${apiEndpoint}/api/setupEmail`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${idToken}`
+      },
+      body: JSON.stringify({ username: uname })
     });
     
-    username = uname;
+    if (!response.ok) {
+      let errorMessage = 'Failed to set up username. Please try again.';
+      try {
+        const data = await response.json();
+        if (data?.error) {
+          errorMessage = data.error;
+        }
+      } catch {
+        // ignore JSON parse errors
+      }
+      throw new Error(errorMessage);
+    }
+    
+    const result = await response.json();
+    const emailDomain = config.emailDomain || config.domain || 'example.com';
+    username = result.username || uname;
     userUid = currentUser.uid;
-    userEmailDisplay.textContent = `${uname}@voicecert.com`;
+    userEmailDisplay.textContent = result.email || `${username}@${emailDomain}`;
     loadInbox();
     showInboxView();
     
@@ -883,7 +938,7 @@ async function setupUsername() {
     updateMessageCount();
   } catch (error) {
     console.error('Error setting up username:', error);
-    alert('Failed to set up username. Please try again.');
+    alert(error.message || 'Failed to set up username. Please try again.');
   }
 }
 
@@ -910,7 +965,9 @@ async function sendEmail() {
     const idToken = await currentUser.getIdToken();
     
     // Send email via Lambda API
-    const response = await fetch('https://www.voicecert.com/api/sendEmail', {
+    // Use relative URL - CloudFront will route /api/* to API Gateway
+    const apiEndpoint = config.apiEndpoint || '';
+    const response = await fetch(`${apiEndpoint}/api/sendEmail`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -946,7 +1003,7 @@ async function sendEmail() {
       subject: subject,
       content: body,
       timestamp: Date.now(),
-      from: `${username}@voicecert.com`,
+      from: `${username}@${config.emailDomain || config.domain || 'example.com'}`,
       messageId: result.MessageId || `local_${Date.now()}`,
       isReply: !!replyingTo,
       replyTo: replyingTo ? replyingTo.id : null
@@ -1414,31 +1471,55 @@ onAuthStateChanged(auth, async (user) => {
   }
   
   console.log('User authenticated, checking profile...');
+  console.log('User UID:', user.uid);
+  console.log('User email:', user.email);
   
   try {
-    // Try to find username
-    const profileSnap = await get(ref(db, `users/${user.uid}/profile`));
+    // Try to find username - use a more defensive approach
+    // First check if we can access the users path
+    const profileRef = ref(db, `users/${user.uid}/profile`);
+    console.log('Attempting to read profile from:', `users/${user.uid}/profile`);
+    
+    const profileSnap = await get(profileRef);
+    console.log('Profile snapshot exists:', profileSnap.exists());
     console.log('Profile snapshot:', profileSnap.exists() ? profileSnap.val() : 'No profile found');
     
-         if (profileSnap.exists() && profileSnap.val().username) {
-       username = profileSnap.val().username;
-       userUid = user.uid;
-       userEmailDisplay.textContent = profileSnap.val().email;
-       console.log('Found existing profile, loading inbox...');
-       loadInbox();
-       showInboxView();
-       
-       // Initialize footer
-       footer.style.display = 'block';
-       updateMessageCount();
-     } else {
+    if (profileSnap.exists() && profileSnap.val().username) {
+      username = profileSnap.val().username;
+      userUid = user.uid;
+      userEmailDisplay.textContent = profileSnap.val().email;
+      console.log('Found existing profile, loading inbox...');
+      loadInbox();
+      showInboxView();
+      
+      // Initialize footer
+      footer.style.display = 'block';
+      updateMessageCount();
+    } else {
       console.log('No profile found, user needs to set up username');
       showSetupView();
     }
   } catch (error) {
     console.error('Error checking user setup:', error);
     console.log('Error details:', error.message, error.code);
-    showSetupView();
+    console.log('Error stack:', error.stack);
+    
+    // Permission denied usually means:
+    // 1. Firebase rules aren't deployed (most common)
+    // 2. User doesn't have permission to read their own profile (rules issue)
+    // In either case, show setup view as fallback
+    if (error.code === 'PERMISSION_DENIED' || error.code === 'permission-denied' || error.message.includes('Permission denied')) {
+      console.warn('⚠️ Permission denied when checking profile. This usually means:');
+      console.warn('   1. Firebase database rules are not deployed');
+      console.warn('   2. Run: npm run deploy-rules');
+      console.warn('   3. Or check Firebase Console > Realtime Database > Rules');
+      console.log('Showing setup view as fallback...');
+      showSetupView();
+    } else {
+      // For other errors, still show setup view as safe fallback
+      console.log('Unexpected error, showing setup view');
+      showSetupView();
+    }
   }
 }); 
 

@@ -1,5 +1,8 @@
 service: voicecert
 
+plugins:
+  - serverless-plugin-include-dependencies
+
 provider:
   name: aws
   runtime: nodejs18.x
@@ -41,6 +44,37 @@ provider:
     binaryMediaTypes:
       - '*/*'
 
+package:
+  patterns:
+    # Exclude unnecessary directories and files first
+    - '!node_modules/**'
+    - '!**/*.md'
+    - '!**/*.txt'
+    - '!.git/**'
+    - '!.vscode/**'
+    - '!.idea/**'
+    - '!**/*.log'
+    - '!**/*.test.js'
+    - '!**/*.spec.js'
+    - '!scripts/**'
+    - '!bin/**'
+    - '!templates/**'
+    - '!mail-server/**'
+    - '!terraform/**'
+    - '!*.sh'
+    - '!*.json.example'
+    - '!example.*'
+    # Include only what Lambda needs
+    - 'api/**'
+    - 'src/**'
+    - 'lib/config.js'
+    - 'firebaseInit.js'
+    - 'package.json'
+    - 'package-lock.json'
+  individually: false
+  excludeDevDependencies: true
+  # The plugin will automatically include production dependencies from node_modules
+
 functions:
   api:
     handler: api/api.handler
@@ -50,7 +84,13 @@ functions:
       - http:
           path: api/{proxy+}  # Wildcard path that matches api/* 
           method: ANY        # Allows all HTTP methods
-          cors: true
+          cors:
+            origin: '*'
+            headers:
+              - Content-Type
+              - Authorization
+              - X-Requested-With
+            allowCredentials: false
           private: false        # Ensure endpoint is public
           authorizer: null     # Disable AWS authorizer
           authentication: null # Disable AWS authentication
