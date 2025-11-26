@@ -47,11 +47,6 @@ variable "s3_webmail_bucket_name" {
   type        = string
 }
 
-variable "email_domain" {
-  description = "Email domain (defaults to domain)"
-  type        = string
-  default     = ""
-}
 
 variable "tags" {
   description = "Common tags for all resources"

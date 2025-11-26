@@ -37,6 +37,10 @@ data "aws_caller_identity" "current" {}
 resource "aws_s3_bucket" "mail_inbox" {
   bucket = var.s3_bucket_name
   
+  # Allow bucket deletion even when it contains objects/versions
+  # This is necessary for Terraform to manage bucket lifecycle
+  force_destroy = true
+  
   tags = {
     Name        = "VCMail Email Inbox"
     Project     = var.project_name
@@ -291,6 +295,9 @@ resource "aws_route53_record" "webmail" {
   zone_id = data.aws_route53_zone.main.zone_id
   name    = var.mail_domain
   type    = "A"
+  
+  # Allow overwriting existing records (prevents conflicts when record already exists)
+  allow_overwrite = true
 
   alias {
     name                   = aws_cloudfront_distribution.webmail.domain_name
@@ -315,11 +322,12 @@ resource "aws_ses_domain_identity_verification" "main" {
 
 # Route53 Record for SES domain verification
 resource "aws_route53_record" "ses_verification" {
-  zone_id = data.aws_route53_zone.main.zone_id
-  name    = "_amazonses.${var.domain}"
-  type    = "TXT"
-  ttl     = 600
-  records = [aws_ses_domain_identity.main.verification_token]
+  zone_id        = data.aws_route53_zone.main.zone_id
+  name           = "_amazonses.${var.domain}"
+  type           = "TXT"
+  ttl            = 600
+  records        = [aws_ses_domain_identity.main.verification_token]
+  allow_overwrite = true
 }
 
 # SES Domain DKIM
@@ -329,12 +337,13 @@ resource "aws_ses_domain_dkim" "main" {
 
 # Route53 Records for SES DKIM
 resource "aws_route53_record" "dkim" {
-  count   = 3
-  zone_id = data.aws_route53_zone.main.zone_id
-  name    = "${aws_ses_domain_dkim.main.dkim_tokens[count.index]}._domainkey.${var.domain}"
-  type    = "CNAME"
-  ttl     = 600
-  records = ["${aws_ses_domain_dkim.main.dkim_tokens[count.index]}.dkim.amazonses.com"]
+  count          = 3
+  zone_id        = data.aws_route53_zone.main.zone_id
+  name           = "${aws_ses_domain_dkim.main.dkim_tokens[count.index]}._domainkey.${var.domain}"
+  type           = "CNAME"
+  ttl            = 600
+  records        = ["${aws_ses_domain_dkim.main.dkim_tokens[count.index]}.dkim.amazonses.com"]
+  allow_overwrite = true
 }
 
 # MX Record for receiving emails via SES
@@ -348,31 +357,14 @@ resource "aws_route53_record" "mx" {
   records = ["10 inbound-smtp.${var.aws_region}.amazonaws.com"]
 }
 
-# SES Custom Mail From Domain
-# This allows sending emails from a subdomain (e.g., mail.example.com) for better deliverability
-resource "aws_ses_domain_mail_from" "main" {
-  domain           = aws_ses_domain_identity.main.domain
-  mail_from_domain = "mail.${var.domain}"
-  
-  depends_on = [aws_ses_domain_identity_verification.main]
-}
-
-# SPF record for custom Mail From domain
-resource "aws_route53_record" "mail_from_spf" {
-  zone_id = data.aws_route53_zone.main.zone_id
-  name    = aws_ses_domain_mail_from.main.mail_from_domain
-  type    = "TXT"
-  ttl     = 600
-  records = ["v=spf1 include:amazonses.com ~all"]
-}
-
-# MX record for custom Mail From domain (required for bounce handling)
-resource "aws_route53_record" "mail_from_mx" {
-  zone_id = data.aws_route53_zone.main.zone_id
-  name    = aws_ses_domain_mail_from.main.mail_from_domain
-  type    = "MX"
-  ttl     = 600
-  records = ["10 feedback-smtp.${var.aws_region}.amazonses.com"]
+# SPF record for root domain (for email authentication when sending from root domain)
+resource "aws_route53_record" "spf" {
+  zone_id         = data.aws_route53_zone.main.zone_id
+  name            = var.domain
+  type            = "TXT"
+  ttl             = 600
+  records         = ["v=spf1 include:amazonses.com ~all"]
+  allow_overwrite = true
 }
 
 # DMARC record for email authentication and policy
@@ -382,6 +374,40 @@ resource "aws_route53_record" "dmarc" {
   type    = "TXT"
   ttl     = 600
   records = ["v=DMARC1; p=quarantine; rua=mailto:dmarc@${var.domain}; ruf=mailto:dmarc@${var.domain}; fo=1"]
+}
+
+# SES MAIL FROM domain configuration
+# This is required for proper DMARC alignment
+# The MAIL FROM domain is used for the Return-Path header in emails
+# NOTE: AWS SES requires the MAIL FROM domain to be a SUBDOMAIN of the verified domain
+# Using a subdomain (mail.example.com) achieves relaxed SPF alignment, which is valid for DMARC
+# Combined with strict DKIM alignment (signing with example.com), this satisfies DMARC requirements
+# We use the same subdomain as the webmail domain (var.mail_domain) - they coexist with different record types
+resource "aws_ses_domain_mail_from" "main" {
+  domain           = aws_ses_domain_identity.main.domain
+  mail_from_domain = var.mail_domain
+}
+
+# Route53 MX record for MAIL FROM domain (required by SES)
+# SES requires this MX record to verify the MAIL FROM domain
+resource "aws_route53_record" "mail_from_mx" {
+  zone_id = data.aws_route53_zone.main.zone_id
+  name    = aws_ses_domain_mail_from.main.mail_from_domain
+  type    = "MX"
+  ttl     = 600
+  records = ["10 feedback-smtp.${var.aws_region}.amazonses.com"]
+  allow_overwrite = true
+}
+
+# Route53 SPF record for MAIL FROM domain (required for DMARC alignment)
+# This SPF record authorizes Amazon SES to send emails on behalf of the MAIL FROM domain
+resource "aws_route53_record" "mail_from_spf" {
+  zone_id = data.aws_route53_zone.main.zone_id
+  name    = aws_ses_domain_mail_from.main.mail_from_domain
+  type    = "TXT"
+  ttl     = 600
+  records = ["v=spf1 include:amazonses.com ~all"]
+  allow_overwrite = true
 }
 
 # SES Email Address (for sending emails)
@@ -481,7 +507,6 @@ resource "aws_lambda_function" "email_processor" {
       })
       VCMAIL_CONFIG = jsonencode({
         domain          = var.domain
-        emailDomain     = var.email_domain != "" ? var.email_domain : var.domain
         s3BucketName    = var.s3_bucket_name
         ssmPrefix       = var.ssm_prefix
         awsRegion       = var.aws_region

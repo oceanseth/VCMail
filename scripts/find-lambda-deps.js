@@ -68,3 +68,5 @@ unscoped.forEach(dep => {
 console.log('\n\nNote: This is a helper script. The template already includes common Firebase dependencies.');
 
 
+
+

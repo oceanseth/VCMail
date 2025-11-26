@@ -2,7 +2,7 @@
   "domain": "example.com",
   "projectName": "vcmail",
   "awsRegion": "us-east-1",
-  "mailDomain": "mail.example.com",
+  "webmailDomain": "mail.example.com",
   "firebaseProjectId": "your-firebase-project-id",
   "firebaseDatabaseURL": "https://your-firebase-project-id.firebaseio.com",
   "firebaseApiKey": "your-firebase-api-key",
@@ -13,7 +13,6 @@
   "s3BucketName": "vcmail-mail-inbox",
   "s3WebmailBucket": "mail.example.com",
   "apiEndpoint": "https://api.example.com",
-  "storageCacheKey": "vcmail_email_cache",
-  "emailDomain": "example.com"
+  "storageCacheKey": "vcmail_email_cache"
 }
 

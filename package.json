@@ -8,7 +8,10 @@
   },
   "scripts": {
     "vcmail": "node bin/vcmail.js",
-    "deploy-rules": "node scripts/deploy-database-rules.js"
+    "build": "vite build",
+    "preview": "vite preview",
+    "deploy-rules": "node scripts/deploy-database-rules.js",
+    "cleanup-old-resources": "node scripts/cleanup-old-resources.js"
   },
   "dependencies": {
     "aws-sdk": "^2.1531.0",
@@ -22,7 +25,10 @@
   },
   "devDependencies": {
     "@types/node": "^20.10.0",
-    "serverless-plugin-include-dependencies": "^6.1.1"
+    "serverless-plugin-include-dependencies": "^6.1.1",
+    "terser": "^5.44.1",
+    "vite": "^5.4.21",
+    "vite-plugin-static-copy": "^1.0.6"
   },
   "keywords": [
     "email",

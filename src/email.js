@@ -6,8 +6,7 @@ import { firebaseConfig, vcmailConfig } from "./firebaseConfig.js";
 // Get VCMail configuration from window object or use defaults
 const config = window.VCMAIL_CONFIG || vcmailConfig || {
   domain: "example.com",
-  emailDomain: "example.com",
-  mailDomain: "mail.example.com",
+  webmailDomain: "mail.example.com",
   apiEndpoint: "https://api.example.com",
   storageCacheKey: "vcmail_email_cache",
   buildId: "unknown"
@@ -38,6 +37,8 @@ let emailListener = null; // For real-time updates
 let lastEmailTimestamp = 0; // Track latest email timestamp
 let isSignUpMode = false; // Track if we're in sign-up mode
 let currentFolder = 'inbox'; // Track current folder (inbox or sent)
+let totalInboxCount = 0; // Track total inbox count
+let totalSentCount = 0; // Track total sent count
 
 // Email cache management
 class EmailCache {
@@ -465,6 +466,7 @@ const setupSection = document.getElementById('setup-section');
 const inboxSection = document.getElementById('inbox-section');
 const emailViewSection = document.getElementById('email-view-section');
 const composeSection = document.getElementById('compose-section');
+const settingsSection = document.getElementById('settings-section');
 
 // Authentication form elements
 const authForm = document.getElementById('auth-form');
@@ -508,6 +510,9 @@ const backFromEmailBtn = document.getElementById('back-from-email-btn');
 const sendBtn = document.getElementById('send-btn');
 const cancelBtn = document.getElementById('cancel-compose-btn');
 const settingsBtn = document.getElementById('settings-btn');
+const backToInboxSettingsBtn = document.getElementById('back-to-inbox-settings-btn');
+const clearCacheBtn = document.getElementById('clear-cache-btn');
+const refreshStorageBtn = document.getElementById('refresh-storage-btn');
 
 // Folder and footer elements
 const inboxTab = document.getElementById('inbox-tab');
@@ -544,7 +549,9 @@ googleSigninBtn.addEventListener('click', () => {
   signInWithPopup(auth, new GoogleAuthProvider());
 });
 
-logoutBtn.addEventListener('click', () => signOut(auth));
+if (logoutBtn) {
+  logoutBtn.addEventListener('click', () => signOut(auth));
+}
 
 // Email/Password authentication handler
 async function handleEmailPasswordAuth() {
@@ -657,16 +664,8 @@ cancelBtn.addEventListener('click', () => {
 });
 
 settingsBtn.addEventListener('click', () => {
-  alert('Settings coming soon!');
+  showSettingsView();
 });
-
-// Add debug button for troubleshooting
-const debugBtn = document.createElement('button');
-debugBtn.textContent = 'Debug Sent';
-debugBtn.className = 'btn btn-secondary';
-debugBtn.style.marginLeft = '8px';
-debugBtn.addEventListener('click', debugSentFolder);
-settingsBtn.parentNode.insertBefore(debugBtn, settingsBtn.nextSibling);
 
 // Folder tab event listeners
 inboxTab.addEventListener('click', () => {
@@ -716,24 +715,51 @@ function extractAndDisplayEmailBody(email) {
   const rawContent = email.content;
   const contentType = email.headers?.content_type;
   
-    // Use DOMPurify to sanitize HTML and remove script tags
-   DOMPurify.sanitize(rawContent, {
-      ALLOWED_TAGS: ['p', 'br', 'div', 'span', 'strong', 'em', 'b', 'i', 'u', 'a', 'ul', 'ol', 'li', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'blockquote', 'pre', 'code', 'img'],
-      ALLOWED_ATTR: ['href', 'src', 'alt', 'title', 'class', 'style'],
-      ALLOW_DATA_ATTR: false
-    });
-    
-    if(contentType === 'text/html') {
-      return rawContent;
-    }
+  // Check if content is HTML (either by content-type header or by detecting HTML tags)
+  const isHtml = (contentType && contentType.includes('text/html')) ||                 
+                 (typeof rawContent === 'string' && /<[a-z][\s\S]*>/i.test(rawContent));
   
-  // For all other content types (text/plain, etc.), format as plain text
+  
+    // Use DOMPurify to sanitize HTML and remove script tags
+      
+    // Custom hook to add target="_blank" to all links
+    DOMPurify.addHook('uponSanitizeElement', (element, node) => {
+      if (element.tagName === 'A' && element.hasAttribute('href')) {
+        element.setAttribute('target', '_blank');
+        element.setAttribute('rel', 'noopener noreferrer'); // Security best practice
+      }
+    });
+
+    
+    // Return the sanitized HTML directly - DO NOT convert newlines to <br> tags
+    const sanitizedHtml = DOMPurify.sanitize(rawContent, {
+      ADD_ATTR: ['target'],
+      FORBID_TAGS: ['script', 'object', 'embed', 'applet'],
+      FORBID_ATTR: ['onload', 'onerror', 'onclick', 'onmouseover', 'onfocus', 'onblur', 'onchange', 'onsubmit', 'onreset', 'onselect', 'onkeydown', 'onkeypress', 'onkeyup', 'onmousedown', 'onmousemove', 'onmouseout', 'onmouseup', 'onabort', 'onerror', 'onload', 'onresize', 'onscroll', 'onunload'],
+      ALLOW_DATA_ATTR: false,
+      SANITIZE_DOM: true,
+      KEEP_CONTENT: true    
+    });
+    if (isHtml) {
+      return sanitizedHtml;
+    }  
+  
+  // For plain text content types, format as plain text and sanitize
   return formatPlainTextAsHtml(rawContent);
 }
 
 // Helper function to format plain text with proper HTML spacing
+// IMPORTANT: This function should ONLY be used for plain text content, not HTML
 function formatPlainTextAsHtml(text) {
   if (!text) return '';
+  
+  // Safety check: if this looks like HTML, don't process it
+  // HTML content should be handled by extractAndDisplayEmailBody before reaching here
+  if (typeof text === 'string' && /<[a-z][\s\S]*>/i.test(text)) {
+    console.warn('formatPlainTextAsHtml received HTML content - this should not happen');
+    // Escape HTML and return as plain text to prevent issues
+    return text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  }
   
   // Split into paragraphs (double line breaks)
   const paragraphs = text.split(/\r?\n\s*\r?\n/);
@@ -751,7 +777,8 @@ function formatPlainTextAsHtml(text) {
       return trimmed;
     } else {
       // Multiple lines, join with <br>
-      return lines.join('<br>');
+      // Escape any HTML characters in plain text to prevent injection
+      return lines.map(line => line.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')).join('<br>');
     }
   }).filter(p => p.length > 0);
   
@@ -855,6 +882,119 @@ function hideAllSections() {
   inboxSection.classList.add('hidden');
   emailViewSection.classList.add('hidden');
   composeSection.classList.add('hidden');
+  settingsSection.classList.add('hidden');
+}
+
+function showSettingsView() {
+  hideAllSections();
+  settingsSection.classList.remove('hidden');
+  appContainer.classList.remove('email-view-mode');
+  
+  // Hide footer when viewing settings
+  footer.style.display = 'none';
+  
+  // Remove scroll listener when viewing settings
+  removeScrollListener();
+  
+  // Update settings information
+  updateSettingsInfo();
+}
+
+function updateSettingsInfo() {
+  // Update storage information
+  const quotaInfo = document.getElementById('quota-info');
+  const usageInfo = document.getElementById('usage-info');
+  const availableInfo = document.getElementById('available-info');
+  const localstorageInfo = document.getElementById('localstorage-info');
+  const cacheInfo = document.getElementById('cache-info');
+  
+  // Storage quota information (simplified)
+  if (navigator.storage && navigator.storage.estimate) {
+    navigator.storage.estimate().then(estimate => {
+      if (quotaInfo) quotaInfo.textContent = `${(estimate.quota / 1024 / 1024).toFixed(1)}MB`;
+      if (usageInfo) usageInfo.textContent = `${(estimate.usage / 1024 / 1024).toFixed(1)}MB`;
+      if (availableInfo && estimate.quota) {
+        const available = estimate.quota - estimate.usage;
+        availableInfo.textContent = `${(available / 1024 / 1024).toFixed(1)}MB`;
+      }
+    }).catch(() => {
+      if (quotaInfo) quotaInfo.textContent = 'Not available';
+      if (usageInfo) usageInfo.textContent = 'Not available';
+      if (availableInfo) availableInfo.textContent = 'Not available';
+    });
+  } else {
+    if (quotaInfo) quotaInfo.textContent = 'Not available';
+    if (usageInfo) usageInfo.textContent = 'Not available';
+    if (availableInfo) availableInfo.textContent = 'Not available';
+  }
+  
+  // localStorage usage
+  let localStorageSize = 0;
+  try {
+    for (let key in localStorage) {
+      if (localStorage.hasOwnProperty(key)) {
+        localStorageSize += localStorage[key].length + key.length;
+      }
+    }
+    if (localstorageInfo) localstorageInfo.textContent = `${(localStorageSize / 1024).toFixed(1)}KB`;
+  } catch (e) {
+    if (localstorageInfo) localstorageInfo.textContent = 'Not available';
+  }
+  
+  // Email cache information
+  const stats = emailCache.getStats();
+  const totalCached = stats.inbox.count + stats.sent.count;
+  if (cacheInfo) cacheInfo.textContent = `${totalCached} emails (${stats.inbox.count} inbox, ${stats.sent.count} sent)`;
+  
+  // Update account information
+  const accountEmail = document.getElementById('account-email');
+  const accountUid = document.getElementById('account-uid');
+  
+  if (accountEmail) {
+    accountEmail.textContent = userEmailDisplay?.textContent || userEmail || 'Not available';
+  }
+  if (accountUid) {
+    accountUid.textContent = userUid || 'Not available';
+  }
+}
+
+// Event listeners for settings
+if (backToInboxSettingsBtn) {
+  backToInboxSettingsBtn.addEventListener('click', () => {
+    showInboxView();
+  });
+}
+
+if (clearCacheBtn) {
+  clearCacheBtn.addEventListener('click', async () => {
+    if (confirm('Are you sure you want to clear the email cache? This will remove all locally stored emails.')) {
+      console.log('🧹 Clearing email cache...');
+      emailCache.clear();
+      
+      // Also clear the counts to force reload
+      totalInboxCount = 0;
+      totalSentCount = 0;
+      
+      updateSettingsInfo();
+      
+      // Force reload emails from Firebase
+      console.log('🔄 Reloading emails after cache clear...');
+      if (currentFolder === 'inbox') {
+        await loadInbox(false);
+      } else {
+        await loadSentEmails(false);
+      }
+      
+      console.log('✅ Cache cleared and emails reloaded');
+      alert('Email cache cleared and reloaded successfully!');
+    }
+  });
+}
+
+if (refreshStorageBtn) {
+  refreshStorageBtn.addEventListener('click', () => {
+    updateSettingsInfo();
+  });
 }
 
 // Folder management
@@ -877,8 +1017,7 @@ function switchToFolder(folder) {
 }
 
 // Track total counts for accurate message counting
-let totalInboxCount = 0;
-let totalSentCount = 0;
+// (Variables declared at top of file to avoid temporal dead zone issues)
 
 function updateMessageCount() {
   const count = currentFolder === 'inbox' ? totalInboxCount : totalSentCount;
@@ -926,7 +1065,7 @@ async function setupUsername() {
     }
     
     const result = await response.json();
-    const emailDomain = config.emailDomain || config.domain || 'example.com';
+    const emailDomain = config.domain || 'example.com';
     username = result.username || uname;
     userUid = currentUser.uid;
     userEmailDisplay.textContent = result.email || `${username}@${emailDomain}`;
@@ -1003,7 +1142,7 @@ async function sendEmail() {
       subject: subject,
       content: body,
       timestamp: Date.now(),
-      from: `${username}@${config.emailDomain || config.domain || 'example.com'}`,
+      from: `${username}@${config.domain || 'example.com'}`,
       messageId: result.MessageId || `local_${Date.now()}`,
       isReply: !!replyingTo,
       replyTo: replyingTo ? replyingTo.id : null

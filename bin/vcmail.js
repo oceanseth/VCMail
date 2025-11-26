@@ -7,16 +7,60 @@
 
 const path = require('path');
 const fs = require('fs-extra');
-const { setup } = require('../lib/setup');
+const { setup, deployHtmlToS3 } = require('../lib/setup');
 
 // Check if running directly or as npm script
 const args = process.argv.slice(2);
 
 // Parse command line arguments
 const skipPrompts = args.includes('-s') || args.includes('--skip-prompts');
+const deployS3Only = args.includes('-s3') || args.includes('--s3');
+
+// Check for subcommands
+const command = args[0];
 
 async function main() {
   try {
+    // Handle -s3 flag: deploy only HTML files to S3
+    if (deployS3Only) {
+      console.log('🚀 VCMail - Deploy HTML to S3\n');
+      
+      // Check AWS CLI prerequisite only
+      const execaModule = await import('execa');
+      const execa = execaModule.default || execaModule;
+      const chalk = (await import('chalk')).default;
+      
+      try {
+        await execa('aws', ['--version'], { stdio: 'pipe', env: process.env });
+        console.log(chalk.green('✓ AWS CLI is installed'));
+      } catch (error) {
+        console.error(chalk.red('✗ AWS CLI is not installed or not in PATH'));
+        throw new Error('AWS CLI is required for S3 deployment');
+      }
+      
+      // Deploy HTML files
+      await deployHtmlToS3();
+      return;
+    }
+    
+    // Handle subcommands
+    if (command === 'cleanup-old-resources') {
+      const oldProjectName = args[1];
+      if (!oldProjectName) {
+        console.error('Error: Please provide the old project name');
+        console.error('Usage: npx vcmail cleanup-old-resources <old-project-name>');
+        process.exit(1);
+      }
+      
+      // Run cleanup script - modify process.argv so script gets the project name
+      const originalArgv = process.argv.slice();
+      process.argv = [process.argv[0], __filename, oldProjectName];
+      require('../scripts/cleanup-old-resources.js');
+      process.argv = originalArgv; // Restore
+      return;
+    }
+    
+    // Default: Run setup wizard
     console.log('🚀 VCMail - Email Infrastructure Setup\n');
     
     // Check prerequisites

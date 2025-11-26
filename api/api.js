@@ -17,7 +17,6 @@ try {
     // Use sensible defaults if config not available
     config = {
         domain: process.env.DOMAIN || 'example.com',
-        emailDomain: process.env.EMAIL_DOMAIN || process.env.DOMAIN || 'example.com',
         s3BucketName: process.env.S3_BUCKET_NAME || 'vcmail-mail-inbox',
         ssmPrefix: process.env.SSM_PREFIX || '/vcmail/prod',
         awsRegion: process.env.AWS_REGION || 'us-east-1'
@@ -29,19 +28,25 @@ const s3 = new AWS.S3({
     signatureVersion: 'v4',
     endpoint: `https://s3.${config.awsRegion || process.env.AWS_REGION || 'us-east-1'}.amazonaws.com`
 });
-const firebaseConfig = JSON.parse(process.env.FIREBASE_CONFIG);
+
+// Parse Firebase config - don't throw at module load time, handle in handler
+let firebaseConfig = null;
+try {
+    if (process.env.FIREBASE_CONFIG) {
+        firebaseConfig = JSON.parse(process.env.FIREBASE_CONFIG);
+    }
+} catch (error) {
+    console.error('Failed to parse FIREBASE_CONFIG at module load:', error);
+    // Don't throw - let handler handle it
+}
+
 const firebaseInitializer = require('../firebaseInit');
 
 
 let firebaseApp;
 
 exports.handler = async (event, context) => {
-    //console.log('Lambda started - full event:', JSON.stringify(event, null, 2));
-    firebaseApp = await firebaseInitializer.get(firebaseConfig.databaseURL);
-    if (event.Records && event.Records[0].eventSource === 'aws:ses') {
-        return await handleSesEvent(event);
-    }
-    
+    // Define headers outside try-catch so they're always available
     const corsHeaders = {
         'Access-Control-Allow-Origin': '*',
         'Access-Control-Allow-Methods': 'GET,POST,PUT,DELETE,OPTIONS',
@@ -56,135 +61,228 @@ exports.handler = async (event, context) => {
         'Access-Control-Allow-Headers': 'Content-Type,Authorization,X-Requested-With',
         'Access-Control-Max-Age': '86400'
     };
-
-    // Handle OPTIONS requests for CORS (check multiple possible event formats)
-    const httpMethod = event.httpMethod || 
-                       event.requestContext?.http?.method || 
-                       event.requestContext?.httpMethod ||
-                       (event.requestContext?.routeKey?.includes('OPTIONS') ? 'OPTIONS' : null);
     
-    if (httpMethod === 'OPTIONS') {
-        console.log('Handling OPTIONS request for CORS');
-        console.log('Event structure:', {
-            httpMethod: event.httpMethod,
-            requestContext: event.requestContext,
-            headers: event.headers
-        });
-        return {
-            statusCode: 200,
-            headers: corsHeaders,
-            body: ''
-        };
-    }
-    
-    // Helper function to get Authorization header (case-insensitive)
-    const getAuthToken = () => {
-        const authHeader = event.headers?.Authorization || 
-                          event.headers?.authorization ||
-                          event.headers?.['authorization'] ||
-                          event.headers?.['Authorization'];
-        return authHeader?.split(' ')[1];
-    };
-
+    // Wrap entire handler in try-catch to catch any unhandled exceptions
     try {
-        console.log('Full event:', JSON.stringify(event, null, 2));
-        const path = event.pathParameters?.proxy;
-        console.log('Proxy path:', path);
+        //console.log('Lambda started - full event:', JSON.stringify(event, null, 2));
         
-        if (!path) {
-            console.log('No proxy path found, returning 404');
+        // Validate Firebase config first
+        if (!firebaseConfig) {
+            try {
+                if (!process.env.FIREBASE_CONFIG) {
+                    throw new Error('FIREBASE_CONFIG environment variable is not set');
+                }
+                firebaseConfig = JSON.parse(process.env.FIREBASE_CONFIG);
+            } catch (error) {
+                console.error('Failed to parse FIREBASE_CONFIG:', error);
+                return {
+                    statusCode: 500,
+                    headers: {
+                        'Access-Control-Allow-Origin': '*',
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({ 
+                        error: `Invalid FIREBASE_CONFIG environment variable: ${error.message}`,
+                        errorCode: 'ConfigurationError'
+                    })
+                };
+            }
+        }
+        
+        // Initialize Firebase with error handling
+        try {
+            console.log('Starting Firebase initialization...');
+            console.log('Database URL:', firebaseConfig.databaseURL);
+            console.log('VCMAIL_CONFIG:', process.env.VCMAIL_CONFIG ? 'Set' : 'Not set');
+            firebaseApp = await firebaseInitializer.get(firebaseConfig.databaseURL);
+            console.log('Firebase initialized successfully');
+        } catch (error) {
+            console.error('Failed to initialize Firebase:', error);
+            console.error('Firebase initialization error name:', error.name);
+            console.error('Firebase initialization error code:', error.code);
+            console.error('Firebase initialization error message:', error.message);
+            console.error('Firebase initialization error stack:', error.stack);
             return {
-                statusCode: 404,
+                statusCode: 500,
                 headers,
-                body: JSON.stringify({ error: 'No path specified' })
+                body: JSON.stringify({ 
+                    error: `Failed to initialize Firebase: ${error.message}`,
+                    errorCode: error.code || error.name,
+                    details: process.env.NODE_ENV === 'development' ? error.stack : undefined
+                })
             };
         }
+        
+        if (event.Records && event.Records[0].eventSource === 'aws:ses') {
+            return await handleSesEvent(event);
+        }
 
-        switch (path) {
-            case 'upload':
-                const token = getAuthToken();
-                if (!token) {
-                    return {
-                        statusCode: 401,
-                        headers,
-                        body: JSON.stringify({ error: 'Authorization token required' })
-                    };
-                }
-                const decodedToken = await firebaseApp.auth().verifyIdToken(token);
-                return await handleUpload(event, decodedToken.uid, headers);
-            case 'setupEmail':
-                const setupToken = getAuthToken();
-                if (!setupToken) {
-                    return {
-                        statusCode: 401,
-                        headers,
-                        body: JSON.stringify({ error: 'Authorization token required' })
-                    };
-                }
-                const setupDecodedToken = await firebaseApp.auth().verifyIdToken(setupToken);
-                return await handleSetupEmail(event, setupDecodedToken, headers);
+        // Handle OPTIONS requests for CORS (check multiple possible event formats)
+        const httpMethod = event.httpMethod || 
+                           event.requestContext?.http?.method || 
+                           event.requestContext?.httpMethod ||
+                           (event.requestContext?.routeKey?.includes('OPTIONS') ? 'OPTIONS' : null);
+        
+        if (httpMethod === 'OPTIONS') {
+            console.log('Handling OPTIONS request for CORS');
+            console.log('Event structure:', {
+                httpMethod: event.httpMethod,
+                requestContext: event.requestContext,
+                headers: event.headers
+            });
+            return {
+                statusCode: 200,
+                headers: corsHeaders,
+                body: ''
+            };
+        }
+        
+        // Helper function to get Authorization header (case-insensitive)
+        const getAuthToken = () => {
+            const authHeader = event.headers?.Authorization || 
+                              event.headers?.authorization ||
+                              event.headers?.['authorization'] ||
+                              event.headers?.['Authorization'];
+            return authHeader?.split(' ')[1];
+        };
+
+        try {
+            // Ensure firebaseApp is initialized
+            if (!firebaseApp) {
+                console.error('firebaseApp is not initialized');
+                return {
+                    statusCode: 500,
+                    headers,
+                    body: JSON.stringify({ error: 'Firebase not initialized' })
+                };
+            }
             
-            case 'getEmails':
-                const emailToken = getAuthToken();
-                if (!emailToken) {
-                    return {
-                        statusCode: 401,
-                        headers,
-                        body: JSON.stringify({ error: 'Authorization token required' })
-                    };
-                }
-                const emailDecodedToken = await firebaseApp.auth().verifyIdToken(emailToken);
-                return await handleGetEmails(event, emailDecodedToken.uid, headers);
+            console.log('Full event:', JSON.stringify(event, null, 2));
+            const path = event.pathParameters?.proxy;
+            console.log('Proxy path:', path);
             
-            case 'getEmailStats':
-                const statsToken = getAuthToken();
-                if (!statsToken) {
-                    return {
-                        statusCode: 401,
-                        headers,
-                        body: JSON.stringify({ error: 'Authorization token required' })
-                    };
-                }
-                const statsDecodedToken = await firebaseApp.auth().verifyIdToken(statsToken);
-                return await handleGetEmailStats(event, statsDecodedToken.uid, headers);
-            
-            case 'sendEmail':
-                const sendToken = getAuthToken();
-                if (!sendToken) {
-                    return {
-                        statusCode: 401,
-                        headers,
-                        body: JSON.stringify({ error: 'Authorization token required' })
-                    };
-                }
-                const sendDecodedToken = await firebaseApp.auth().verifyIdToken(sendToken);
-                return await handleSendEmail(event, sendDecodedToken, headers);
-            
-            case 'deleteEmail':
-                const deleteToken = getAuthToken();
-                if (!deleteToken) {
-                    return {
-                        statusCode: 401,
-                        headers,
-                        body: JSON.stringify({ error: 'Authorization token required' })
-                    };
-                }
-                const deleteDecodedToken = await firebaseApp.auth().verifyIdToken(deleteToken);
-                return await handleDeleteEmail(event, deleteDecodedToken.uid, headers);
-            
-            default:
+            if (!path) {
+                console.log('No proxy path found, returning 404');
                 return {
                     statusCode: 404,
                     headers,
-                    body: JSON.stringify({ error: 'Not Found' })
+                    body: JSON.stringify({ error: 'No path specified' })
                 };
+            }
+
+            switch (path) {
+                case 'upload':
+                    const token = getAuthToken();
+                    if (!token) {
+                        return {
+                            statusCode: 401,
+                            headers,
+                            body: JSON.stringify({ error: 'Authorization token required' })
+                        };
+                    }
+                    const decodedToken = await firebaseApp.auth().verifyIdToken(token);
+                    return await handleUpload(event, decodedToken.uid, headers);
+                case 'setupEmail':
+                    const setupToken = getAuthToken();
+                    if (!setupToken) {
+                        return {
+                            statusCode: 401,
+                            headers,
+                            body: JSON.stringify({ error: 'Authorization token required' })
+                        };
+                    }
+                    const setupDecodedToken = await firebaseApp.auth().verifyIdToken(setupToken);
+                    return await handleSetupEmail(event, setupDecodedToken, headers);
+                
+                case 'getEmails':
+                    const emailToken = getAuthToken();
+                    if (!emailToken) {
+                        return {
+                            statusCode: 401,
+                            headers,
+                            body: JSON.stringify({ error: 'Authorization token required' })
+                        };
+                    }
+                    const emailDecodedToken = await firebaseApp.auth().verifyIdToken(emailToken);
+                    return await handleGetEmails(event, emailDecodedToken.uid, headers);
+                
+                case 'getEmailStats':
+                    const statsToken = getAuthToken();
+                    if (!statsToken) {
+                        return {
+                            statusCode: 401,
+                            headers,
+                            body: JSON.stringify({ error: 'Authorization token required' })
+                        };
+                    }
+                    const statsDecodedToken = await firebaseApp.auth().verifyIdToken(statsToken);
+                    return await handleGetEmailStats(event, statsDecodedToken.uid, headers);
+                
+                case 'sendEmail':
+                    const sendToken = getAuthToken();
+                    if (!sendToken) {
+                        return {
+                            statusCode: 401,
+                            headers,
+                            body: JSON.stringify({ error: 'Authorization token required' })
+                        };
+                    }
+                    const sendDecodedToken = await firebaseApp.auth().verifyIdToken(sendToken);
+                    return await handleSendEmail(event, sendDecodedToken, headers);
+                
+                case 'deleteEmail':
+                    const deleteToken = getAuthToken();
+                    if (!deleteToken) {
+                        return {
+                            statusCode: 401,
+                            headers,
+                            body: JSON.stringify({ error: 'Authorization token required' })
+                        };
+                    }
+                    const deleteDecodedToken = await firebaseApp.auth().verifyIdToken(deleteToken);
+                    return await handleDeleteEmail(event, deleteDecodedToken.uid, headers);
+                
+                default:
+                    return {
+                        statusCode: 404,
+                        headers,
+                        body: JSON.stringify({ error: 'Not Found' })
+                    };
+            }
+        } catch (error) {
+            console.error('Handler error:', error);
+            console.error('Error stack:', error.stack);
+            
+            return {
+                statusCode: 500,
+                headers,
+                body: JSON.stringify({ 
+                    error: error.message || 'Internal server error',
+                    details: process.env.NODE_ENV === 'development' ? error.stack : undefined
+                })
+            };
         }
     } catch (error) {
-        console.error('Handler error:', error);
+        // Outer catch block - catches any unhandled exceptions from the entire handler
+        console.error('Unhandled exception in Lambda handler:', error);
+        console.error('Error name:', error.name);
+        console.error('Error code:', error.code);
+        console.error('Error message:', error.message);
+        console.error('Error stack:', error.stack);
+        
+        // Return a detailed error response
         return {
             statusCode: 500,
-            headers,
-            body: JSON.stringify({ error: error.message })
+            headers: {
+                'Access-Control-Allow-Origin': '*',
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({ 
+                error: 'Internal server error',
+                message: error.message || 'An unexpected error occurred',
+                errorCode: error.code || error.name,
+                details: error.stack || undefined
+            })
         };
     }
 };
@@ -257,7 +355,7 @@ async function handleSesEvent(event) {
                     console.log('Parsed email data:', JSON.stringify(emailData, null, 2));
                     
                     // Process each recipient
-                    const emailDomain = config.emailDomain || config.domain || 'example.com';
+                    const emailDomain = config.domain || 'example.com';
                     console.log('Processing recipients:', ses.mail.destination);
                     for (const recipient of ses.mail.destination) {
                         console.log('Checking recipient:', recipient);
@@ -837,7 +935,7 @@ async function handleUpload(event, userId, headers) {
     }
 
     const contentType = body.contentType;
-    const userRef = firebaseInitializer.firebaseApp.database().ref(`users/${userId}/currentChallenge`);
+    const userRef = firebaseApp.database().ref(`users/${userId}/currentChallenge`);
     const snapshot = await userRef.once('value');
     let challengeId = snapshot.val();
     if(!challengeId) { challengeId = '0'; }
@@ -857,7 +955,7 @@ async function handleUpload(event, userId, headers) {
     const fileExtension = getFileExtension(contentType);
     const filename = `challenges/${userId}/${challengeId}/${timestamp}${fileExtension}`;
     
-    const webmailBucket = config.s3WebmailBucket || config.mailDomain || 'mail.example.com';
+    const webmailBucket = config.s3WebmailBucket || config.webmailDomain || config.mailDomain || 'mail.example.com';
 
     console.log('Generating presigned URL with params:', {
         Bucket: webmailBucket,
@@ -961,7 +1059,7 @@ async function handleSetupEmail(event, decodedToken, headers) {
         }
 
         const uid = decodedToken.uid;
-        const emailDomain = config.emailDomain || config.domain || 'example.com';
+        const emailDomain = config.domain || 'example.com';
         const email = `${username}@${emailDomain}`;
         const db = firebaseApp.database();
         
@@ -1202,7 +1300,7 @@ async function handleSendEmail(event, decodedToken, headers) {
         }
 
         const senderUsername = profileSnapshot.val().username;
-        const emailDomain = config.emailDomain || config.domain || 'example.com';
+        const emailDomain = config.domain || 'example.com';
         const senderEmail = `${senderUsername}@${emailDomain}`;
 
         // Send email via SES

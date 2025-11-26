@@ -1,0 +1,22 @@
+{
+  "Name": "vcmail-email-rule",
+  "Enabled": true,
+  "Recipients": [
+    "masky.ai"
+  ],
+  "Actions": [
+    {
+      "S3Action": {
+        "BucketName": "masky-mail-inbox"
+      }
+    },
+    {
+      "LambdaAction": {
+        "FunctionArn": "arn:aws:lambda:us-east-1:218827615080:function:vcmail-api",
+        "InvocationType": "Event"
+      }
+    }
+  ],
+  "ScanEnabled": true
+}
+

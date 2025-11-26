@@ -1,0 +1,1 @@
+﻿{"body":"{\"to\":\"test@example.com\",\"subject\":\"Test\",\"body\":\"Test\"}","pathParameters":{"proxy":"sendEmail"},"httpMethod":"POST","path":"/api/sendEmail","isBase64Encoded":false,"headers":{"Content-Type":"application/json","Authorization":"Bearer test"}}

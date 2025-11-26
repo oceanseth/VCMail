@@ -1,0 +1,8 @@
+{
+  "Variables": {
+    "FIREBASE_CONFIG": "{\"databaseURL\":\"https://maskydotnet-default-rtdb.firebaseio.com\",\"projectId\":\"maskydotnet\"}",
+    "VCMAIL_CONFIG": "{\"awsRegion\":\"us-east-1\",\"domain\":\"masky.ai\",\"s3BucketName\":\"masky-mail-inbox\",\"ssmPrefix\":\"/masky/prod\"}"
+  }
+}
+
+

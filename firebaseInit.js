@@ -35,12 +35,27 @@ class FirebaseInitializer {
       }
 
       const ssmPrefix = config.ssmPrefix || process.env.SSM_PREFIX || '/vcmail/prod';
+      const paramName = `${ssmPrefix}/firebase_service_account`;
       const params = {
-        Name: `${ssmPrefix}/firebase_service_account`,
+        Name: paramName,
         WithDecryption: true
       };
 
-      const result = await this.ssm.getParameter(params).promise();
+      console.log(`Attempting to read SSM parameter: ${paramName}`);
+      console.log(`SSM Prefix from config: ${config.ssmPrefix}`);
+      console.log(`SSM Prefix from env: ${process.env.SSM_PREFIX}`);
+      
+      let result;
+      try {
+        result = await this.ssm.getParameter(params).promise();
+        console.log(`Successfully retrieved SSM parameter: ${paramName}`);
+      } catch (ssmError) {
+        console.error(`Failed to get SSM parameter ${paramName}:`, ssmError);
+        console.error(`SSM Error Code: ${ssmError.code}`);
+        console.error(`SSM Error Message: ${ssmError.message}`);
+        console.error(`SSM Error Stack: ${ssmError.stack}`);
+        throw new Error(`Failed to retrieve Firebase service account from SSM parameter ${paramName}: ${ssmError.code} - ${ssmError.message}`);
+      }
       
       if (!result?.Parameter?.Value) {
         throw new Error('Firebase service account credentials not found in SSM');

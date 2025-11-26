@@ -1,0 +1,21 @@
+{
+  "httpMethod": "POST",
+  "path": "/api/sendEmail",
+  "pathParameters": {
+    "proxy": "sendEmail"
+  },
+  "headers": {
+    "Authorization": "Bearer test-token",
+    "Content-Type": "application/json"
+  },
+  "body": "{\"to\":\"test@example.com\",\"subject\":\"Test\",\"body\":\"Test body\"}",
+  "isBase64Encoded": false,
+  "requestContext": {
+    "requestId": "test-request-id",
+    "httpMethod": "POST",
+    "path": "/api/sendEmail",
+    "stage": "prod"
+  }
+}
+
+

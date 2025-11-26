@@ -16,8 +16,7 @@ export const firebaseConfig = window.VCMAIL_CONFIG?.firebase || {
 // VCMail application config
 export const vcmailConfig = window.VCMAIL_CONFIG || {
   domain: "example.com",
-  emailDomain: "example.com",
-  mailDomain: "mail.example.com",
+  webmailDomain: "mail.example.com",
   apiEndpoint: "https://api.example.com",
   storageCacheKey: "vcmail_email_cache",
   buildId: "local-dev"
