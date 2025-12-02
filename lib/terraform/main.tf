@@ -162,6 +162,8 @@ resource "aws_cloudfront_distribution" "webmail" {
   }
 
   # API Gateway origin for /api/* requests
+  # Note: origin_path prepends the stage name to all requests
+  # So /api/something becomes /prod/api/something when forwarded to API Gateway
   origin {
     domain_name = "${aws_api_gateway_rest_api.main.id}.execute-api.${var.aws_region}.amazonaws.com"
     origin_id   = "API-${aws_api_gateway_rest_api.main.id}"
@@ -181,6 +183,14 @@ resource "aws_cloudfront_distribution" "webmail" {
   default_root_object = "index.html"
 
   aliases = [var.mail_domain]
+
+  # Optional: Enable CloudFront logging for debugging
+  # Uncomment and configure S3 bucket for logs if needed
+  # logging_config {
+  #   include_cookies = false
+  #   bucket          = "${var.project_name}-cloudfront-logs.s3.amazonaws.com"
+  #   prefix          = "cloudfront/"
+  # }
 
   # Cache behavior for /api/* - forward to API Gateway
   ordered_cache_behavior {
@@ -424,9 +434,20 @@ resource "aws_ses_configuration_set" "main" {
   }
 }
 
+# Determine which rule set to use
+locals {
+  # Use existing VCMail rule set if provided, otherwise use project-specific one
+  rule_set_name = var.shared_rule_set_name != "" ? var.shared_rule_set_name : "${var.project_name}-incoming-email"
+  
+  # Only create/activate rule set if we're not using a shared one
+  should_manage_rule_set = var.shared_rule_set_name == ""
+}
+
 # SES Receipt Rule Set (for processing incoming emails)
+# Only create if not using a shared rule set
 resource "aws_ses_receipt_rule_set" "main" {
-  rule_set_name = "${var.project_name}-incoming-email"
+  count        = local.should_manage_rule_set ? 1 : 0
+  rule_set_name = local.rule_set_name
   
   lifecycle {
     # Prevent Terraform from deleting the rule set if it exists
@@ -437,8 +458,10 @@ resource "aws_ses_receipt_rule_set" "main" {
 }
 
 # Activate the rule set
+# Only activate if we created the rule set (not using a shared one)
 resource "aws_ses_active_receipt_rule_set" "main" {
-  rule_set_name = aws_ses_receipt_rule_set.main.rule_set_name
+  count        = local.should_manage_rule_set ? 1 : 0
+  rule_set_name = aws_ses_receipt_rule_set.main[0].rule_set_name
   
   lifecycle {
     # Prevent accidental deletion of active rule set
@@ -448,9 +471,10 @@ resource "aws_ses_active_receipt_rule_set" "main" {
 }
 
 # SES Receipt Rule (to store emails in S3 and invoke Lambda)
+# ALWAYS create - adds rule to either shared or new rule set
 resource "aws_ses_receipt_rule" "main" {
   name          = "${var.project_name}-email-rule"
-  rule_set_name = aws_ses_receipt_rule_set.main.rule_set_name
+  rule_set_name = local.rule_set_name  # References rule set by name (works even if not in Terraform state)
   enabled       = true
   scan_enabled  = true
 
@@ -718,8 +742,15 @@ resource "aws_api_gateway_deployment" "main" {
 }
 
 # API Gateway Stage
+# Note: deployment_id references the deployment resource, so Terraform will automatically
+# update the stage when a new deployment is created
 resource "aws_api_gateway_stage" "main" {
   deployment_id = aws_api_gateway_deployment.main.id
   rest_api_id   = aws_api_gateway_rest_api.main.id
   stage_name    = "prod"
+  
+  # Ensure stage is updated when deployment changes
+  lifecycle {
+    create_before_destroy = false
+  }
 }

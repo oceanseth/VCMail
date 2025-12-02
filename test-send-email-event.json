@@ -8,7 +8,7 @@
     "Authorization": "Bearer test-token",
     "Content-Type": "application/json"
   },
-  "body": "{\"to\":\"test@example.com\",\"subject\":\"Test\",\"body\":\"Test body\"}",
+  "body": "{\"to\":\"seth@snapchallenge.com\",\"subject\":\"test\",\"body\":\"test\"}",
   "isBase64Encoded": false,
   "requestContext": {
     "requestId": "test-request-id",
@@ -17,6 +17,4 @@
     "stage": "prod"
   }
 }
-
-
 

@@ -719,9 +719,8 @@ function extractAndDisplayEmailBody(email) {
   const isHtml = (contentType && contentType.includes('text/html')) ||                 
                  (typeof rawContent === 'string' && /<[a-z][\s\S]*>/i.test(rawContent));
   
-  
+  if (isHtml) {
     // Use DOMPurify to sanitize HTML and remove script tags
-      
     // Custom hook to add target="_blank" to all links
     DOMPurify.addHook('uponSanitizeElement', (element, node) => {
       if (element.tagName === 'A' && element.hasAttribute('href')) {
@@ -730,7 +729,6 @@ function extractAndDisplayEmailBody(email) {
       }
     });
 
-    
     // Return the sanitized HTML directly - DO NOT convert newlines to <br> tags
     const sanitizedHtml = DOMPurify.sanitize(rawContent, {
       ADD_ATTR: ['target'],
@@ -740,9 +738,12 @@ function extractAndDisplayEmailBody(email) {
       SANITIZE_DOM: true,
       KEEP_CONTENT: true    
     });
-    if (isHtml) {
-      return sanitizedHtml;
-    }  
+    
+    // Remove the hook after use to avoid memory leaks
+    DOMPurify.removeHook('uponSanitizeElement');
+    
+    return sanitizedHtml;
+  }
   
   // For plain text content types, format as plain text and sanitize
   return formatPlainTextAsHtml(rawContent);

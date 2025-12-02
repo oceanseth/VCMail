@@ -1,0 +1,1 @@
+{"statusCode":200,"headers":{"Access-Control-Allow-Origin":"*","Access-Control-Allow-Methods":"GET,POST,PUT,DELETE,OPTIONS","Access-Control-Allow-Headers":"Content-Type,Authorization,X-Requested-With","Access-Control-Max-Age":"86400"},"body":"{\"message\":\"Email sent successfully\",\"messageId\":\"0100019ae0881296-5c4e082c-2cae-4da8-a918-0d3bc133b96d-000000\"}"}

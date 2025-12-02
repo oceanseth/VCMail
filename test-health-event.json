@@ -1,0 +1,20 @@
+{
+  "httpMethod": "POST",
+  "path": "/api/test",
+  "pathParameters": {
+    "proxy": "test"
+  },
+  "headers": {
+    "Content-Type": "application/json"
+  },
+  "body": "{}",
+  "isBase64Encoded": false,
+  "requestContext": {
+    "requestId": "test-request-id",
+    "httpMethod": "POST",
+    "path": "/api/test",
+    "stage": "prod",
+    "apiId": "vgv1rnzmhi"
+  }
+}
+

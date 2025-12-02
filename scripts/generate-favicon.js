@@ -127,3 +127,4 @@ fs.writeFileSync(faviconPath, icoData);
 console.log(`✓ Generated favicon.ico (${icoData.length} bytes)`);
 
 
+

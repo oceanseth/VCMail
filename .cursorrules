@@ -1,0 +1,54 @@
+# VCMail Package - Development Rules
+
+## Important: Deployment Context
+
+⚠️ **CRITICAL**: This is the VCMail PACKAGE repository, not a consuming project.
+
+### Deployment Rules:
+- **NEVER deploy directly from this repository**
+- **NEVER run `npx vcmail` or Terraform commands from this directory**
+- Lambda packages prepared here are TEMPLATES - they must be deployed from the consuming project directory
+- When users run `npx vcmail` in their project, it:
+  1. Copies Terraform files to `.vcmail-terraform/` in THEIR project
+  2. Prepares Lambda package in THEIR project's `vcmail-lambda-package/` directory
+  3. Runs Terraform from THEIR project directory
+
+### What This Repository Is:
+- Source code for the VCMail npm package
+- Template Terraform files in `lib/terraform/`
+- Lambda source code in `api/` and `src/`
+- Setup scripts in `lib/setup.js` and `bin/vcmail.js`
+
+### What This Repository Is NOT:
+- A deployment target
+- A project-specific configuration
+- A place to run `terraform apply`
+
+### When Working on VCMail:
+- Make changes to source files here
+- Test locally if needed, but remember deployments happen elsewhere
+- If suggesting deployment commands, remind users to run them from THEIR project directory
+- Lambda package preparation scripts here are for the consuming project to use
+
+### Example Project Structure:
+```
+user-project/
+  ├── .vcmail-terraform/          # Terraform files (copied from this package)
+  ├── vcmail-lambda-package/      # Lambda package (prepared by setup script)
+  ├── vcmail.config.json          # User's configuration
+  └── (user's project files)
+
+vcmail-package/ (this repo)
+  ├── lib/terraform/              # Template Terraform files
+  ├── api/                        # Lambda handler source
+  ├── lib/setup.js               # Setup wizard
+  └── bin/vcmail.js              # CLI entry point
+```
+
+### Reminder for AI Assistant:
+When suggesting deployment or testing commands:
+1. Always remind the user to run commands from their project directory
+2. Never suggest running `terraform apply` or `npx vcmail` from this package directory
+3. If testing Lambda locally, use the consuming project's prepared package
+4. Changes to source files here require users to redeploy from their project
+

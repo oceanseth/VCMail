@@ -3,7 +3,7 @@
 # creates the mx records, cloudfront distribution, api gateway, and lambda for https://mail.yourdomain.com to provide and serve email
 
 1. clone this repo
-2. run npx link in this project
-3. run npx link vcmail in project you want to run webmail on
-4. run npx vcmail in project you want to have webmail forthe mail backend api)
-5. follow promps to enter values/generate vcmail.config file, make sure terraform completes
+2. run `npm link` in this project (creates a global symlink for the vcmail package)
+3. run `npm link vcmail` in the project where you want to run webmail on
+4. run `npx vcmail` in the project where you want to have webmail (for the mail backend API)
+5. follow prompts to enter values/generate vcmail.config file, make sure terraform completes

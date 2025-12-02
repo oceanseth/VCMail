@@ -1,0 +1,20 @@
+{
+  "httpMethod": "POST",
+  "path": "/api/sendEmail",
+  "pathParameters": {
+    "proxy": "sendEmail"
+  },
+  "headers": {
+    "Authorization": "Bearer eyJhbGciOiJSUzI1NiIsImtpZCI6IjdjNzQ5NTFmNjBhMDE0NzE3ZjFlMzA4ZDZiMjgwZjQ4ZjFlODhmZGEiLCJ0eXAiOiJKV1QifQ.eyJuYW1lIjoiU2V0aCBDYWxkd2VsbCIsInBpY3R1cmUiOiJodHRwczovL2xoMy5nb29nbGV1c2VyY29udGVudC5jb20vYS9BQ2c4b2NLX1JPNGJwOWtLMWRodF9DZGthcGtGVnVXeVdGdmtoVkZTcHlpeHRUa05hWmRDUVZWQT1zOTYtYyIsImlzcyI6Imh0dHBzOi8vc2VjdXJldG9rZW4uZ29vZ2xlLmNvbS9tYXNreWRvdG5ldCIsImF1ZCI6Im1hc2t5ZG90bmV0IiwiYXV0aF90aW1lIjoxNzYzMzcxOTI5LCJ1c2VyX2lkIjoiZUMxRFJ4aGJXVk5ueUN4NUk4MlhZVUFzcmV0MiIsInN1YiI6ImVDMURSeGhiV1ZObnlDeDVJODJYWVVBc3JldDIiLCJpYXQiOjE3NjQ3MDE2NDcsImV4cCI6MTc2NDcwNTI0NywiZW1haWwiOiJzZXRoQHNuYXBjaGFsbGVuZ2UubmV0IiwiZW1haWxfdmVyaWZpZWQiOnRydWUsImZpcmViYXNlIjp7ImlkZW50aXRpZXMiOnsiZ29vZ2xlLmNvbSI6WyIxMDE3MDgzNTIwODU5NDkwNDc5NzQiXSwiZW1haWwiOlsic2V0aEBzbmFwY2hhbGxlbmdlLm5ldCJdfSwic2lnbl9pbl9wcm92aWRlciI6Imdvb2dsZS5jb20ifX0.eSvb3HubAB3hk9WKGa6teaYW6p-pQopDZYWzQ8JiKK8UrGBmyfZizau_7kRLqjH3FaiEeq_7jnO8pJ5XCsMBFSeAom0dMdUG80wUOhgy4UPiQ9oZeh5LmF-rym9OcTVGHSUK3ORb1eFUM4-E5c8T4mXmNQzg0WjzLP-nuBBzWzE4KJxadZqdV1YiEq0W5erR0NY-Vr0q30Vpv_f4jbRyu5688DIjyWGXeoYS_9xZxfQ88QJUI-A4SQ5pTXDDF6pWP1IjJEQiIQzdNxiQlaujr8BzJQkzevMNZoFstFROQ1sF4rPEYefbX9sBtltmKIgm9x8qeAdg496YvML4rBjnzQ",
+    "Content-Type": "application/json"
+  },
+  "body": "{\"to\":\"seth@snapchallenge.com\",\"subject\":\"test\",\"body\":\"test\"}",
+  "isBase64Encoded": false,
+  "requestContext": {
+    "requestId": "test-request-id",
+    "httpMethod": "POST",
+    "path": "/api/sendEmail",
+    "stage": "prod"
+  }
+}
+

@@ -47,6 +47,11 @@ variable "s3_webmail_bucket_name" {
   type        = string
 }
 
+variable "shared_rule_set_name" {
+  description = "Optional: Name of existing SES rule set to use (for multi-project setups). If set, this project will add its rule to the existing rule set instead of creating a new one."
+  type        = string
+  default     = ""
+}
 
 variable "tags" {
   description = "Common tags for all resources"

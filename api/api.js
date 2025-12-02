@@ -66,54 +66,49 @@ exports.handler = async (event, context) => {
     try {
         //console.log('Lambda started - full event:', JSON.stringify(event, null, 2));
         
-        // Validate Firebase config first
-        if (!firebaseConfig) {
-            try {
-                if (!process.env.FIREBASE_CONFIG) {
-                    throw new Error('FIREBASE_CONFIG environment variable is not set');
-                }
-                firebaseConfig = JSON.parse(process.env.FIREBASE_CONFIG);
-            } catch (error) {
-                console.error('Failed to parse FIREBASE_CONFIG:', error);
-                return {
-                    statusCode: 500,
-                    headers: {
-                        'Access-Control-Allow-Origin': '*',
-                        'Content-Type': 'application/json'
-                    },
-                    body: JSON.stringify({ 
-                        error: `Invalid FIREBASE_CONFIG environment variable: ${error.message}`,
-                        errorCode: 'ConfigurationError'
-                    })
-                };
-            }
-        }
-        
-        // Initialize Firebase with error handling
-        try {
-            console.log('Starting Firebase initialization...');
-            console.log('Database URL:', firebaseConfig.databaseURL);
-            console.log('VCMAIL_CONFIG:', process.env.VCMAIL_CONFIG ? 'Set' : 'Not set');
-            firebaseApp = await firebaseInitializer.get(firebaseConfig.databaseURL);
-            console.log('Firebase initialized successfully');
-        } catch (error) {
-            console.error('Failed to initialize Firebase:', error);
-            console.error('Firebase initialization error name:', error.name);
-            console.error('Firebase initialization error code:', error.code);
-            console.error('Firebase initialization error message:', error.message);
-            console.error('Firebase initialization error stack:', error.stack);
-            return {
-                statusCode: 500,
-                headers,
-                body: JSON.stringify({ 
-                    error: `Failed to initialize Firebase: ${error.message}`,
-                    errorCode: error.code || error.name,
-                    details: process.env.NODE_ENV === 'development' ? error.stack : undefined
-                })
-            };
-        }
-        
+        // Handle SES events first (these don't need Firebase)
         if (event.Records && event.Records[0].eventSource === 'aws:ses') {
+            // SES events need Firebase, so initialize it
+            if (!firebaseConfig) {
+                try {
+                    if (!process.env.FIREBASE_CONFIG) {
+                        throw new Error('FIREBASE_CONFIG environment variable is not set');
+                    }
+                    firebaseConfig = JSON.parse(process.env.FIREBASE_CONFIG);
+                } catch (error) {
+                    console.error('Failed to parse FIREBASE_CONFIG:', error);
+                    return {
+                        statusCode: 500,
+                        headers: {
+                            'Access-Control-Allow-Origin': '*',
+                            'Content-Type': 'application/json'
+                        },
+                        body: JSON.stringify({ 
+                            error: `Invalid FIREBASE_CONFIG environment variable: ${error.message}`,
+                            errorCode: 'ConfigurationError'
+                        })
+                    };
+                }
+            }
+            
+            if (!firebaseApp) {
+                try {
+                    console.log('Starting Firebase initialization for SES event...');
+                    firebaseApp = await firebaseInitializer.get(firebaseConfig.databaseURL);
+                    console.log('Firebase initialized successfully');
+                } catch (error) {
+                    console.error('Failed to initialize Firebase:', error);
+                    return {
+                        statusCode: 500,
+                        headers,
+                        body: JSON.stringify({ 
+                            error: `Failed to initialize Firebase: ${error.message}`,
+                            errorCode: error.code || error.name
+                        })
+                    };
+                }
+            }
+            
             return await handleSesEvent(event);
         }
 
@@ -125,11 +120,6 @@ exports.handler = async (event, context) => {
         
         if (httpMethod === 'OPTIONS') {
             console.log('Handling OPTIONS request for CORS');
-            console.log('Event structure:', {
-                httpMethod: event.httpMethod,
-                requestContext: event.requestContext,
-                headers: event.headers
-            });
             return {
                 statusCode: 200,
                 headers: corsHeaders,
@@ -147,19 +137,87 @@ exports.handler = async (event, context) => {
         };
 
         try {
-            // Ensure firebaseApp is initialized
-            if (!firebaseApp) {
-                console.error('firebaseApp is not initialized');
-                return {
-                    statusCode: 500,
-                    headers,
-                    body: JSON.stringify({ error: 'Firebase not initialized' })
-                };
-            }
-            
             console.log('Full event:', JSON.stringify(event, null, 2));
             const path = event.pathParameters?.proxy;
             console.log('Proxy path:', path);
+            
+            // Health check endpoint - no auth required, helps debug API Gateway -> Lambda connection
+            // This endpoint works even if Firebase is not initialized - check it FIRST, before Firebase init
+            if (path === 'health' || path === 'test') {
+                return {
+                    statusCode: 200,
+                    headers,
+                    body: JSON.stringify({ 
+                        status: 'ok',
+                        message: 'API is working',
+                        timestamp: new Date().toISOString(),
+                        path: path,
+                        eventPath: event.path,
+                        pathParameters: event.pathParameters,
+                        httpMethod: event.httpMethod,
+                        requestContext: event.requestContext ? {
+                            requestId: event.requestContext.requestId,
+                            stage: event.requestContext.stage,
+                            apiId: event.requestContext.apiId
+                        } : null,
+                        firebaseInitialized: !!firebaseApp,
+                        config: {
+                            domain: config.domain,
+                            awsRegion: config.awsRegion,
+                            s3BucketName: config.s3BucketName
+                        }
+                    })
+                };
+            }
+            
+            // Now initialize Firebase for all other endpoints
+            if (!firebaseConfig) {
+                try {
+                    if (!process.env.FIREBASE_CONFIG) {
+                        throw new Error('FIREBASE_CONFIG environment variable is not set');
+                    }
+                    firebaseConfig = JSON.parse(process.env.FIREBASE_CONFIG);
+                } catch (error) {
+                    console.error('Failed to parse FIREBASE_CONFIG:', error);
+                    return {
+                        statusCode: 500,
+                        headers: {
+                            'Access-Control-Allow-Origin': '*',
+                            'Content-Type': 'application/json'
+                        },
+                        body: JSON.stringify({ 
+                            error: `Invalid FIREBASE_CONFIG environment variable: ${error.message}`,
+                            errorCode: 'ConfigurationError'
+                        })
+                    };
+                }
+            }
+            
+            // Initialize Firebase with error handling
+            if (!firebaseApp) {
+                try {
+                    console.log('Starting Firebase initialization...');
+                    console.log('Database URL:', firebaseConfig.databaseURL);
+                    console.log('VCMAIL_CONFIG:', process.env.VCMAIL_CONFIG ? 'Set' : 'Not set');
+                    firebaseApp = await firebaseInitializer.get(firebaseConfig.databaseURL);
+                    console.log('Firebase initialized successfully');
+                } catch (error) {
+                    console.error('Failed to initialize Firebase:', error);
+                    console.error('Firebase initialization error name:', error.name);
+                    console.error('Firebase initialization error code:', error.code);
+                    console.error('Firebase initialization error message:', error.message);
+                    console.error('Firebase initialization error stack:', error.stack);
+                    return {
+                        statusCode: 500,
+                        headers,
+                        body: JSON.stringify({ 
+                            error: `Failed to initialize Firebase: ${error.message}`,
+                            errorCode: error.code || error.name,
+                            details: process.env.NODE_ENV === 'development' ? error.stack : undefined
+                        })
+                    };
+                }
+            }
             
             if (!path) {
                 console.log('No proxy path found, returning 404');
@@ -167,6 +225,16 @@ exports.handler = async (event, context) => {
                     statusCode: 404,
                     headers,
                     body: JSON.stringify({ error: 'No path specified' })
+                };
+            }
+            
+            // Ensure firebaseApp is initialized for all other endpoints
+            if (!firebaseApp) {
+                console.error('firebaseApp is not initialized');
+                return {
+                    statusCode: 500,
+                    headers,
+                    body: JSON.stringify({ error: 'Firebase not initialized' })
                 };
             }
 
@@ -227,8 +295,23 @@ exports.handler = async (event, context) => {
                             body: JSON.stringify({ error: 'Authorization token required' })
                         };
                     }
-                    const sendDecodedToken = await firebaseApp.auth().verifyIdToken(sendToken);
-                    return await handleSendEmail(event, sendDecodedToken, headers);
+                    try {
+                        const sendDecodedToken = await firebaseApp.auth().verifyIdToken(sendToken);
+                        return await handleSendEmail(event, sendDecodedToken, headers);
+                    } catch (tokenError) {
+                        console.error('Error verifying token for sendEmail:', tokenError);
+                        console.error('Token error details:', {
+                            name: tokenError.name,
+                            code: tokenError.code,
+                            message: tokenError.message,
+                            stack: tokenError.stack
+                        });
+                        return {
+                            statusCode: 401,
+                            headers,
+                            body: JSON.stringify({ error: 'Invalid or expired token', details: tokenError.message })
+                        };
+                    }
                 
                 case 'deleteEmail':
                     const deleteToken = getAuthToken();
@@ -251,40 +334,47 @@ exports.handler = async (event, context) => {
             }
         } catch (error) {
             console.error('Handler error:', error);
+            console.error('Error name:', error.name);
+            console.error('Error code:', error.code);
+            console.error('Error message:', error.message);
             console.error('Error stack:', error.stack);
+            console.error('Full error object:', JSON.stringify(error, Object.getOwnPropertyNames(error)));
             
             return {
                 statusCode: 500,
                 headers,
                 body: JSON.stringify({ 
-                    error: error.message || 'Internal server error',
+                    error: 'Internal server error',
+                    message: error.message || 'An unexpected error occurred',
+                    errorCode: error.code || error.name,
                     details: process.env.NODE_ENV === 'development' ? error.stack : undefined
                 })
             };
         }
-    } catch (error) {
-        // Outer catch block - catches any unhandled exceptions from the entire handler
-        console.error('Unhandled exception in Lambda handler:', error);
-        console.error('Error name:', error.name);
-        console.error('Error code:', error.code);
-        console.error('Error message:', error.message);
-        console.error('Error stack:', error.stack);
-        
-        // Return a detailed error response
-        return {
-            statusCode: 500,
-            headers: {
-                'Access-Control-Allow-Origin': '*',
-                'Content-Type': 'application/json'
-            },
-            body: JSON.stringify({ 
-                error: 'Internal server error',
-                message: error.message || 'An unexpected error occurred',
-                errorCode: error.code || error.name,
-                details: error.stack || undefined
-            })
-        };
-    }
+        } catch (error) {
+            // Outer catch block - catches any unhandled exceptions from the entire handler
+            console.error('Unhandled exception in Lambda handler:', error);
+            console.error('Error name:', error.name);
+            console.error('Error code:', error.code);
+            console.error('Error message:', error.message);
+            console.error('Error stack:', error.stack);
+            console.error('Full error object:', JSON.stringify(error, Object.getOwnPropertyNames(error)));
+            
+            // Return a detailed error response
+            return {
+                statusCode: 500,
+                headers: {
+                    'Access-Control-Allow-Origin': '*',
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify({ 
+                    error: 'Internal server error',
+                    message: error.message || 'An unexpected error occurred',
+                    errorCode: error.code || error.name,
+                    details: process.env.NODE_ENV === 'development' ? error.stack : undefined
+                })
+            };
+        }
 };
 async function handleSesEvent(event) {
     console.log('=== SES EVENT RECEIVED ===');
@@ -308,12 +398,12 @@ async function handleSesEvent(event) {
             
             // Use messageId to read email from S3 bucket
             if (ses.mail && ses.mail.messageId) {
-                console.log('✅ Found messageId:', ses.mail.messageId);
+                console.log('[OK] Found messageId:', ses.mail.messageId);
                 
                 const s3Key = ses.mail.messageId;
                 const bucketName = config.s3BucketName || process.env.S3_BUCKET_NAME || 'vcmail-mail-inbox';
                 
-                console.log(`📦 Reading email from S3: s3://${bucketName}/${s3Key}`);
+                console.log(`[S3] Reading email from S3: s3://${bucketName}/${s3Key}`);
                 
                 try {
                     // Read email content from S3
@@ -323,7 +413,7 @@ async function handleSesEvent(event) {
                     };
                     
                     const s3Result = await s3.getObject(s3Params).promise();
-                    console.log('✅ Successfully read email from S3');
+                    console.log('[OK] Successfully read email from S3');
                     
                     // Parse the email content from S3
                     const emailContent = s3Result.Body.toString('utf-8');
@@ -345,9 +435,9 @@ async function handleSesEvent(event) {
                     } else {
                         // This is a simple email, just decode if needed
                         const transferEncoding = emailData.headers['content-transfer-encoding'] || '';
-                        if (transferEncoding.toLowerCase() === 'quoted-printable') {
-                            console.log('Decoding quoted-printable simple email...');
-                            emailData.body = decodeQuotedPrintable(emailData.body);
+                        if (transferEncoding) {
+                            console.log(`Decoding simple email with encoding: ${transferEncoding}`);
+                            emailData.body = decodePartContent(emailData.body, transferEncoding);
                         }
                         emailData.headers.content_type = contentType;
                     }
@@ -361,34 +451,34 @@ async function handleSesEvent(event) {
                         console.log('Checking recipient:', recipient);
                         if (recipient.endsWith(`@${emailDomain}`)) {
                             const username = recipient.split('@')[0];
-                            console.log(`✅ Found @${emailDomain} recipient:`, username);
+                            console.log(`[OK] Found @${emailDomain} recipient:`, username);
                             await storeEmailForUser(username, ses.mail.messageId, emailData);
                             processedCount++;
                         } else {
-                            console.log(`❌ Recipient not @${emailDomain}:`, recipient);
+                            console.log(`[ERROR] Recipient not @${emailDomain}:`, recipient);
                         }
                     }
                 } catch (s3Error) {
-                    console.error('❌ Error reading email from S3:', s3Error);
+                    console.error('[ERROR] Error reading email from S3:', s3Error);
                     errorCount++;
                 }
             } else {
-                console.log('❌ No messageId found in SES mail data');
+                console.log('[ERROR] No messageId found in SES mail data');
             }
             
             // Process receipt action if available
             if (ses.receipt) {
-                console.log('📋 Receipt action:', {
+                console.log('[INFO] Receipt action:', {
                     action: ses.receipt.action,
                     recipient: ses.receipt.recipients,
                     timestamp: ses.receipt.timestamp,
                     processingTimeMillis: ses.receipt.processingTimeMillis
                 });
             } else {
-                console.log('❌ No receipt action found');
+                console.log('[ERROR] No receipt action found');
             }
         } catch (error) {
-            console.error('❌ Error processing SES record:', error);
+            console.error('[ERROR] Error processing SES record:', error);
             errorCount++;
         }
     }
@@ -415,7 +505,7 @@ async function handleSesEvent(event) {
 }
 
 async function storeEmailForUser(username, messageId, emailData) {
-    console.log(`📧 Storing email for user: ${username}`);
+    console.log(`[INFO] Storing email for user: ${username}`);
     console.log(`Message ID: ${messageId}`);
     
     try {
@@ -425,15 +515,15 @@ async function storeEmailForUser(username, messageId, emailData) {
         const usernameSnapshot = await usernameRef.once('value');
         
         if (!usernameSnapshot.exists()) {
-            console.log(`❌ No user found for username: ${username}`);
+            console.log(`[ERROR] No user found for username: ${username}`);
             return;
         }
         
         const uid = usernameSnapshot.val();
-        console.log(`✅ Found UID for ${username}: ${uid}`);
+        console.log(`[OK] Found UID for ${username}: ${uid}`);
         
         if (!uid) {
-            console.log(`❌ No UID found for username: ${username}`);
+            console.log(`[ERROR] No UID found for username: ${username}`);
             return;
         }
         
@@ -482,8 +572,8 @@ async function storeEmailForUser(username, messageId, emailData) {
         // Store email in Firebase using timestamp as key
         const emailKey = `email_${Date.now()}`;
         const firebasePath = `emails/${uid}/${emailKey}`;
-        console.log(`📝 Storing email in Firebase at path: ${firebasePath}`);
-        console.log(`📧 Email record preview:`, {
+        console.log(`[INFO] Storing email in Firebase at path: ${firebasePath}`);
+        console.log(`[INFO] Email record preview:`, {
             messageId: emailRecord.messageId,
             subject: emailRecord.subject,
             contentType: emailRecord.contentType,
@@ -493,25 +583,25 @@ async function storeEmailForUser(username, messageId, emailData) {
         
         const emailRef = firebaseApp.database().ref(firebasePath);
         await emailRef.set(emailRecord);
-        console.log(`✅ Email stored in Firebase successfully`);
+        console.log(`[OK] Email stored in Firebase successfully`);
         
         // Update email count for inbox
         const emailCountsRef = firebaseApp.database().ref(`users/${uid}/emailCounts/inbox`);
         await emailCountsRef.transaction((currentCount) => {
             return (currentCount || 0) + 1;
         });
-        console.log(`✅ Inbox email count updated`);
+        console.log(`[OK] Inbox email count updated`);
         
         // Log attachment details if any
         if (emailStructure && emailStructure.attachments.length > 0) {
-            console.log(`📎 Attachments found:`, emailStructure.attachments.map(att => ({
+            console.log(`[INFO] Attachments found:`, emailStructure.attachments.map(att => ({
                 filename: att.filename,
                 contentType: att.contentType,
                 size: att.size
             })));
         }
         
-        console.log(`📊 Updating user email statistics...`);
+        console.log(`[INFO] Updating user email statistics...`);
         // Update user's email statistics
         const userStatsRef = firebaseApp.database().ref(`users/${uid}/emailStats`);
         await userStatsRef.transaction((currentStats) => {
@@ -523,9 +613,9 @@ async function storeEmailForUser(username, messageId, emailData) {
                 lastEmailTimestamp: emailRecord.timestamp
             };
         });
-        console.log(`✅ Email statistics updated`);
+        console.log(`[OK] Email statistics updated`);
         
-        console.log(`🎉 Email stored successfully for user ${username} (UID: ${uid}) in Firebase (S3 already handled by SES)`);
+        console.log(`[SUCCESS] Email stored successfully for user ${username} (UID: ${uid}) in Firebase (S3 already handled by SES)`);
         
     } catch (error) {
         console.error(`Error storing email for user ${username}:`, error);
@@ -792,10 +882,8 @@ function extractMimePart(rawBody, boundary, preferHtml = true) {
         let body = htmlPart.body;
         console.log('Processing HTML part with encoding:', htmlPart.encoding);
         
-        if (htmlPart.encoding === 'quoted-printable') {
-            console.log('Decoding quoted-printable HTML...');
-            body = decodeQuotedPrintable(body);
-        }
+        // Decode content-transfer-encoding (base64 or quoted-printable)
+        body = decodePartContent(body, htmlPart.encoding);
         
         // Decode HTML entities for HTML content
         console.log('Decoding HTML entities...');
@@ -812,10 +900,8 @@ function extractMimePart(rawBody, boundary, preferHtml = true) {
         let body = textPart.body;
         console.log('Processing text part with encoding:', textPart.encoding);
         
-        if (textPart.encoding === 'quoted-printable') {
-            console.log('Decoding quoted-printable text...');
-            body = decodeQuotedPrintable(body);
-        }
+        // Decode content-transfer-encoding (base64 or quoted-printable)
+        body = decodePartContent(body, textPart.encoding);
         
         // Clean up any remaining boundary markers
         body = body.replace(new RegExp(`--${boundary.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}--?$`, 'g'), '').trim();
@@ -1337,7 +1423,7 @@ async function handleSendEmail(event, decodedToken, headers) {
         await sentCountsRef.transaction((currentCount) => {
             return (currentCount || 0) + 1;
         });
-        console.log(`✅ Sent email count updated`);
+        console.log(`[OK] Sent email count updated`);
 
         return {
             statusCode: 200,
@@ -1350,6 +1436,11 @@ async function handleSendEmail(event, decodedToken, headers) {
 
     } catch (error) {
         console.error('Error sending email:', error);
+        console.error('Error name:', error.name);
+        console.error('Error code:', error.code);
+        console.error('Error message:', error.message);
+        console.error('Error stack:', error.stack);
+        console.error('Full error object:', JSON.stringify(error, Object.getOwnPropertyNames(error)));
         
         // Handle SES-specific errors
         if (error.code === 'MessageRejected') {
@@ -1377,7 +1468,9 @@ async function handleSendEmail(event, decodedToken, headers) {
             headers,
             body: JSON.stringify({ 
                 error: 'Failed to send email',
-                details: error.message 
+                message: error.message || 'An unexpected error occurred',
+                errorCode: error.code || error.name,
+                details: process.env.NODE_ENV === 'development' ? error.stack : undefined
             })
         };
     }

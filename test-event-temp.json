@@ -1,0 +1,19 @@
+﻿{
+    "body":  "{\"to\":\"seth@snapchallenge.com\",\"subject\":\"test\",\"body\":\"test\"}",
+    "pathParameters":  {
+                           "proxy":  "sendEmail"
+                       },
+    "requestContext":  {
+                           "httpMethod":  "POST",
+                           "path":  "/api/sendEmail",
+                           "stage":  "prod",
+                           "requestId":  "test-request-id"
+                       },
+    "httpMethod":  "POST",
+    "path":  "/api/sendEmail",
+    "isBase64Encoded":  false,
+    "headers":  {
+                    "Content-Type":  "application/json",
+                    "Authorization":  "Bearer test-token"
+                }
+}
