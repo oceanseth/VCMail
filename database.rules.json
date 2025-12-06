@@ -29,7 +29,10 @@
           ".read": "auth != null && auth.uid === $uid",
           ".write": "auth != null && auth.uid === $uid",
           "$emailId": {
-            ".validate": "newData.hasChildren(['messageId', 'from', 'to', 'subject', 'timestamp', 'content'])"
+            ".validate": "newData == null || (!data.exists() && newData.hasChildren(['messageId', 'from', 'to', 'subject', 'timestamp', 'content'])) || data.exists()",
+            "read": {
+              ".validate": "newData.isBoolean()"
+            }
           }
         }
       },
@@ -39,7 +42,10 @@
           ".read": "auth != null && auth.uid === $uid",
           ".write": "auth != null && auth.uid === $uid",
           "$emailId": {
-            ".validate": "newData.hasChildren(['messageId', 'from', 'to', 'subject', 'timestamp', 'content'])"
+            ".validate": "newData == null || (!data.exists() && newData.hasChildren(['messageId', 'from', 'to', 'subject', 'timestamp', 'content'])) || data.exists()",
+            "read": {
+              ".validate": "newData.isBoolean()"
+            }
           }
         }
       },

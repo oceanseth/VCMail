@@ -446,7 +446,10 @@ async function handleSesEvent(event) {
                     
                     // Process each recipient
                     const emailDomain = config.domain || 'example.com';
+                    console.log(`[INFO] Lambda configured for domain: ${emailDomain}`);
                     console.log('Processing recipients:', ses.mail.destination);
+                    
+                    let hasMatchingRecipient = false;
                     for (const recipient of ses.mail.destination) {
                         console.log('Checking recipient:', recipient);
                         if (recipient.endsWith(`@${emailDomain}`)) {
@@ -454,9 +457,17 @@ async function handleSesEvent(event) {
                             console.log(`[OK] Found @${emailDomain} recipient:`, username);
                             await storeEmailForUser(username, ses.mail.messageId, emailData);
                             processedCount++;
+                            hasMatchingRecipient = true;
                         } else {
-                            console.log(`[ERROR] Recipient not @${emailDomain}:`, recipient);
+                            const recipientDomain = recipient.split('@')[1];
+                            console.log(`[INFO] Recipient ${recipient} is for domain ${recipientDomain}, not ${emailDomain}`);
+                            console.log(`[INFO] This Lambda handles ${emailDomain} only. Email will be processed by the Lambda for ${recipientDomain}`);
                         }
+                    }
+                    
+                    if (!hasMatchingRecipient) {
+                        console.log(`[INFO] No recipients matched this Lambda's domain (${emailDomain}). This is expected if SES routed the email incorrectly or if multiple Lambdas share the same rule set.`);
+                        console.log(`[INFO] Returning success - the correct Lambda for this domain should process it.`);
                     }
                 } catch (s3Error) {
                     console.error('[ERROR] Error reading email from S3:', s3Error);
@@ -1389,7 +1400,80 @@ async function handleSendEmail(event, decodedToken, headers) {
         const emailDomain = config.domain || 'example.com';
         const senderEmail = `${senderUsername}@${emailDomain}`;
 
-        // Send email via SES
+        // Check if sending to same domain - handle directly without SES
+        if (to.endsWith(`@${emailDomain}`)) {
+            const recipientUsername = to.split('@')[0];
+            console.log(`[INFO] Same-domain email detected. Recipient: ${recipientUsername}`);
+            
+            // Check if recipient exists
+            const recipientUsernameRef = firebaseApp.database().ref(`usernames/${recipientUsername}`);
+            const recipientUsernameSnapshot = await recipientUsernameRef.once('value');
+            
+            if (!recipientUsernameSnapshot.exists()) {
+                return {
+                    statusCode: 404,
+                    headers,
+                    body: JSON.stringify({ 
+                        error: `Recipient ${to} does not exist. The user must set up their email address first.`,
+                        errorCode: 'RecipientNotFound'
+                    })
+                };
+            }
+            
+            // Generate a message ID (similar to SES format)
+            const messageId = `vcmail-${Date.now()}-${Math.random().toString(36).substring(2, 15)}`;
+            
+            // Create email content in raw format (similar to what SES stores)
+            const dateHeader = new Date().toUTCString();
+            const rawEmail = `From: ${senderEmail}\r\nTo: ${to}\r\nSubject: ${subject}\r\nDate: ${dateHeader}\r\nMessage-ID: <${messageId}@${emailDomain}>\r\nMIME-Version: 1.0\r\nContent-Type: text/plain; charset=UTF-8\r\nContent-Transfer-Encoding: 7bit\r\n\r\n${emailBody}`;
+            
+            // Save to S3 (same bucket as SES uses)
+            const bucketName = config.s3BucketName || process.env.S3_BUCKET_NAME || 'vcmail-mail-inbox';
+            const s3Params = {
+                Bucket: bucketName,
+                Key: messageId,
+                Body: rawEmail,
+                ContentType: 'message/rfc822'
+            };
+            
+            await s3.putObject(s3Params).promise();
+            console.log(`[OK] Email saved to S3: s3://${bucketName}/${messageId}`);
+            
+            // Create emailData structure similar to what parseEmailContent creates
+            const emailData = {
+                from: senderEmail,
+                to: to,
+                subject: subject,
+                body: emailBody,
+                headers: {
+                    'content-type': 'text/plain; charset=UTF-8',
+                    'mime-version': '1.0',
+                    'date': dateHeader,
+                    'message-id': `<${messageId}@${emailDomain}>`
+                }
+            };
+            
+            // Store in Firebase using existing function
+            await storeEmailForUser(recipientUsername, messageId, emailData);
+            
+            // Update sent email count
+            const sentCountsRef = firebaseApp.database().ref(`users/${uid}/emailCounts/sent`);
+            await sentCountsRef.transaction((currentCount) => {
+                return (currentCount || 0) + 1;
+            });
+            console.log(`[OK] Sent email count updated`);
+            
+            return {
+                statusCode: 200,
+                headers,
+                body: JSON.stringify({ 
+                    message: 'Email sent successfully (same-domain delivery)',
+                    messageId: messageId
+                })
+            };
+        }
+
+        // External domain - use SES
         const sesRegion = config.awsRegion || process.env.AWS_REGION || 'us-east-1';
         const ses = new AWS.SES({ region: sesRegion });
         
@@ -1409,7 +1493,10 @@ async function handleSendEmail(event, decodedToken, headers) {
                         Charset: 'UTF-8'
                     }
                 }
-            }
+            },
+            // Use Configuration Set for better deliverability tracking
+            // This helps with reputation monitoring and deliverability
+            ConfigurationSetName: config.configurationSetName || `${config.domain?.split('.')[0] || 'vcmail'}-email-config`
         };
 
         console.log('Attempting to send email via SES with params:', JSON.stringify(emailParams, null, 2));

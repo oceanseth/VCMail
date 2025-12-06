@@ -8,6 +8,7 @@
 const path = require('path');
 const fs = require('fs-extra');
 const { setup, deployHtmlToS3 } = require('../lib/setup');
+const { verifySESSetup } = require('../scripts/verify-ses-setup');
 
 // Check if running directly or as npm script
 const args = process.argv.slice(2);
@@ -44,6 +45,18 @@ async function main() {
     }
     
     // Handle subcommands
+    if (command === 'verify' || command === 'check') {
+      console.log('🔍 VCMail - Verification\n');
+      await verifySESSetup();
+      return;
+    }
+    
+    if (command === 'check-domains' || command === 'multi-domain') {
+      const { checkMultiDomainSetup } = require('../scripts/check-multi-domain-setup');
+      await checkMultiDomainSetup();
+      return;
+    }
+    
     if (command === 'cleanup-old-resources') {
       const oldProjectName = args[1];
       if (!oldProjectName) {

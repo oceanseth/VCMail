@@ -20,6 +20,14 @@ When you run `npx vcmail` for a new project:
    - The existing rule set remains active
 
 3. **Rule Creation**: Each project creates its own rule with a unique name: `${project_name}-email-rule`
+   - Each rule matches emails for its specific domain only
+   - Each rule routes emails to its own Lambda function
+
+4. **Lambda Independence**: Each project has its own Lambda function:
+   - Lambda's `VCMAIL_CONFIG.domain` is set to that project's domain only
+   - Lambda only processes emails for its configured domain
+   - If an email for another domain somehow reaches this Lambda, it logs an info message and returns success (doesn't process it)
+   - **Projects don't need to know about each other** - each Lambda is completely independent
 
 ### Example Scenario
 

@@ -378,12 +378,16 @@ resource "aws_route53_record" "spf" {
 }
 
 # DMARC record for email authentication and policy
+# Start with p=none to build domain reputation, then move to p=quarantine, then p=reject
+# p=none: Monitor only, don't quarantine/reject (best for new domains)
+# p=quarantine: Mark suspicious emails as spam (use after building reputation)
+# p=reject: Reject emails that fail DMARC (use only after proven reputation)
 resource "aws_route53_record" "dmarc" {
   zone_id = data.aws_route53_zone.main.zone_id
   name    = "_dmarc.${var.domain}"
   type    = "TXT"
   ttl     = 600
-  records = ["v=DMARC1; p=quarantine; rua=mailto:dmarc@${var.domain}; ruf=mailto:dmarc@${var.domain}; fo=1"]
+  records = ["v=DMARC1; p=none; rua=mailto:dmarc@${var.domain}; ruf=mailto:dmarc@${var.domain}; fo=1; pct=100"]
 }
 
 # SES MAIL FROM domain configuration
@@ -437,9 +441,11 @@ resource "aws_ses_configuration_set" "main" {
 # Determine which rule set to use
 locals {
   # Use existing VCMail rule set if provided, otherwise use project-specific one
+  # This ensures we always use the active rule set if one exists, preventing duplicate rule sets
   rule_set_name = var.shared_rule_set_name != "" ? var.shared_rule_set_name : "${var.project_name}-incoming-email"
   
   # Only create/activate rule set if we're not using a shared one
+  # When using a shared rule set, we never create or activate - we just add our rule to it
   should_manage_rule_set = var.shared_rule_set_name == ""
 }
 
@@ -492,6 +498,13 @@ resource "aws_ses_receipt_rule" "main" {
     invocation_type = "Event"
     position        = 2
   }
+
+  # Stop action prevents SES from further processing after this rule matches
+  # This ensures SES accepts the email even if the username doesn't exist in Firebase
+  stop_action {
+    scope    = "RuleSet"
+    position = 3
+  }
   
   lifecycle {
     # Only recreate if the configuration actually changes
@@ -530,10 +543,11 @@ resource "aws_lambda_function" "email_processor" {
         databaseURL  = var.firebase_database_url
       })
       VCMAIL_CONFIG = jsonencode({
-        domain          = var.domain
-        s3BucketName    = var.s3_bucket_name
-        ssmPrefix       = var.ssm_prefix
-        awsRegion       = var.aws_region
+        domain             = var.domain
+        s3BucketName       = var.s3_bucket_name
+        ssmPrefix          = var.ssm_prefix
+        awsRegion          = var.aws_region
+        configurationSetName = "${var.project_name}-email-config"
       })
     }
   }
@@ -737,6 +751,8 @@ resource "aws_api_gateway_deployment" "main" {
       aws_api_gateway_method.options.id,
       aws_api_gateway_integration.lambda.id,
       aws_api_gateway_integration.options.id,
+      aws_lambda_function.email_processor.invoke_arn,
+      aws_lambda_function.email_processor.source_code_hash,
     ]))
   }
 }
