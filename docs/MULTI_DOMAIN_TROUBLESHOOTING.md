@@ -4,6 +4,21 @@
 
 If you have two domains set up with VCMail but emails for one domain aren't being delivered, this guide will help you diagnose and fix the issue.
 
+## Quick Diagnosis
+
+Run the diagnostic tool to identify the issue:
+
+```bash
+npx vcmail diagnose
+```
+
+This will check:
+- All Lambda functions and their configured domains
+- Active SES rule set and all rules
+- Whether rules point to the correct Lambda
+- Domain verification status
+- MX record configuration
+
 ## Root Cause
 
 Each Lambda function's `VCMAIL_CONFIG.domain` environment variable is set to **only ONE domain** (the domain for that project). This is by design - **projects are independent and don't need to know about each other**.
@@ -64,11 +79,18 @@ Modify the Lambda function to check against multiple domains. This requires code
 ### Scenario 2: SES Receipt Rule Missing for One Domain
 
 **Symptoms:**
-- `npx vcmail check-domains` shows one domain has a rule, the other doesn't
+- `npx vcmail diagnose` shows one domain has a rule, the other doesn't
 - Emails to the domain without a rule bounce or aren't received
+- Diagnostic shows "No active rule set found"
 
 **Solution:**
 Run `npx vcmail` in the project directory for the domain that's missing the rule.
+
+**If No Active Rule Set Exists:**
+This is a critical issue - SES cannot process emails without an active rule set. To fix:
+1. Run `npx vcmail` in the project directory for the domain
+2. This will create and activate a rule set
+3. If multiple domains share the same AWS account, the first domain creates the rule set, and subsequent domains add their rules to it
 
 ### Scenario 3: Both Domains Share Same Lambda, But Lambda Only Processes One
 
@@ -182,11 +204,32 @@ After fixing, verify:
 5. ✅ Send test email to each domain
 6. ✅ Check Lambda logs: Should show `[OK] Found @domain recipient` for both
 
+## Common Error: "Address not found"
+
+If you see "Address not found" when sending emails, check:
+
+1. **No Active Rule Set** (most common):
+   - Diagnostic shows "No active rule set found"
+   - **Fix**: Run `npx vcmail` in the project directory to create/activate rule set
+
+2. **Rule Set Exists But Not Active**:
+   - Diagnostic shows inactive rule sets exist
+   - **Fix**: Activate the rule set: `aws ses set-active-receipt-rule-set --rule-set-name "<rule-set-name>"`
+   - Or run `npx vcmail` to activate it
+
+3. **Rule Missing for Domain**:
+   - Active rule set exists but no rule for your domain
+   - **Fix**: Run `npx vcmail` in the project directory to add the rule
+
+4. **Rule Points to Wrong Lambda**:
+   - Rule exists but points to Lambda for different domain
+   - **Fix**: Run `terraform apply` in `.vcmail-terraform` directory to update the rule
+
 ## Getting Help
 
 If issues persist:
 
-1. Run `npx vcmail check-domains` and share the output
+1. Run `npx vcmail diagnose` and share the output
 2. Check Lambda CloudWatch logs for the domain mismatch errors
 3. Verify SES receipt rules exist for both domains
 4. Ensure MX records are correct for both domains

@@ -7,8 +7,9 @@
 
 const path = require('path');
 const fs = require('fs-extra');
-const { setup, deployHtmlToS3 } = require('../lib/setup');
+const { setup, deployHtmlToS3, deployFirebaseRules } = require('../lib/setup');
 const { verifySESSetup } = require('../scripts/verify-ses-setup');
+const { getConfigWithDefaults, CONFIG_FILE } = require('../lib/config');
 
 // Check if running directly or as npm script
 const args = process.argv.slice(2);
@@ -57,6 +58,12 @@ async function main() {
       return;
     }
     
+    if (command === 'diagnose' || command === 'diagnose-domains') {
+      const { diagnoseMultiDomainIssue } = require('../scripts/diagnose-multi-domain-issue');
+      await diagnoseMultiDomainIssue();
+      return;
+    }
+    
     if (command === 'cleanup-old-resources') {
       const oldProjectName = args[1];
       if (!oldProjectName) {
@@ -70,6 +77,32 @@ async function main() {
       process.argv = [process.argv[0], __filename, oldProjectName];
       require('../scripts/cleanup-old-resources.js');
       process.argv = originalArgv; // Restore
+      return;
+    }
+    
+    if (command === 'setup-auth' || command === 'setup-firebase-auth') {
+      console.log('🔐 VCMail - Setup Firebase Authentication\n');
+      const { setupFirebaseAuth } = require('../scripts/setup-firebase-auth');
+      const result = await setupFirebaseAuth();
+      process.exit(result.success ? 0 : 1);
+      return;
+    }
+    
+    if (command === 'deploy-rules' || command === 'deploy-firebase-rules') {
+      console.log('📋 VCMail - Deploy Firebase Database Rules\n');
+      const { deployFirebaseRules } = require('../lib/setup');
+      const { loadConfig, getConfigWithDefaults } = require('../lib/config');
+      const configPath = path.join(process.cwd(), CONFIG_FILE);
+      
+      if (!await fs.pathExists(configPath)) {
+        console.error('Error: Configuration file not found. Please run "npx vcmail" first.');
+        process.exit(1);
+      }
+      
+      const fileConfig = await fs.readJson(configPath);
+      const config = getConfigWithDefaults(fileConfig);
+      await deployFirebaseRules(config);
+      process.exit(0);
       return;
     }
     

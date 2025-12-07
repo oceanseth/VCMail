@@ -137,3 +137,4 @@ The `npx vcmail` setup now includes automatic CloudFront configuration verificat
 - Run from VCMail package directory: `node scripts/check-cloudfront-config.js <domain> <api-gateway-id> [stage]`
 
 
+

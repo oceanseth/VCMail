@@ -2,18 +2,18 @@
     "rules": {
       "users": {
         "$userId": {
-          ".read": "auth != null && auth.uid === $userId",
-          ".write": "auth != null && auth.uid === $userId",
+          ".read": "auth != null && auth.uid == $userId",
+          ".write": "auth != null && auth.uid == $userId",
           "currentChallenge": {
             ".validate": "newData.isNumber()"
           },
           "profile": {
-            ".read": "auth != null && auth.uid === $userId",
-            ".write": "auth != null && auth.uid === $userId"
+            ".read": "auth != null && auth.uid == $userId",
+            ".write": "auth != null && auth.uid == $userId"
           },
           "emailCounts": {
-            ".read": "auth != null && auth.uid === $userId",
-            ".write": "auth != null && auth.uid === $userId",
+            ".read": "auth != null && auth.uid == $userId",
+            ".write": "auth != null && auth.uid == $userId",
             "inbox": {
               ".validate": "newData.isNumber() && newData.val() >= 0"
             },
@@ -26,10 +26,10 @@
       "emails": {
         "$uid": {
           ".indexOn": "timestamp",
-          ".read": "auth != null && auth.uid === $uid",
-          ".write": "auth != null && auth.uid === $uid",
+          ".read": "auth != null && auth.uid == $uid",
+          ".write": "auth != null && auth.uid == $uid",
           "$emailId": {
-            ".validate": "newData == null || (!data.exists() && newData.hasChildren(['messageId', 'from', 'to', 'subject', 'timestamp', 'content'])) || data.exists()",
+            ".validate": "!newData.exists() || (!data.exists() && newData.hasChildren(['messageId', 'from', 'to', 'subject', 'timestamp', 'content'])) || data.exists()",
             "read": {
               ".validate": "newData.isBoolean()"
             }
@@ -39,10 +39,10 @@
       "sent": {
         "$uid": {
           ".indexOn": "timestamp",
-          ".read": "auth != null && auth.uid === $uid",
-          ".write": "auth != null && auth.uid === $uid",
+          ".read": "auth != null && auth.uid == $uid",
+          ".write": "auth != null && auth.uid == $uid",
           "$emailId": {
-            ".validate": "newData == null || (!data.exists() && newData.hasChildren(['messageId', 'from', 'to', 'subject', 'timestamp', 'content'])) || data.exists()",
+            ".validate": "!newData.exists() || (!data.exists() && newData.hasChildren(['messageId', 'from', 'to', 'subject', 'timestamp', 'content'])) || data.exists()",
             "read": {
               ".validate": "newData.isBoolean()"
             }
@@ -52,8 +52,8 @@
       "usernames": {
         "$username": {
           ".read": true,
-          ".write": "auth != null && (!data.exists() || data.val() === auth.uid)",
-          ".validate": "newData.isString() && (!data.exists() || data.val() === auth.uid) && (!root.child('users').child(auth.uid).child('profile').child('username').exists() || root.child('users').child(auth.uid).child('profile').child('username').val() === $username)"
+          ".write": "auth != null",
+          ".validate": "auth != null && newData.isString() && newData.val() == auth.uid"
         }
       }
     }
