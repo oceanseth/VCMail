@@ -65,6 +65,40 @@ Want more advanced features? Create a free tier Oracle server and run the `serve
   - Allows 'share with internal' tagged emails to be linked to/seen by Jill when she's at the same company as you.
   - Ensures Jill is the only one able to read the email or the content it links to.
 
+### 🔗 Using VCMail as a Local Development Dependency
+
+You're working on another project and want to use VCMail CLI commands (`npx vcmail`) without publishing to npm or cloning into each project:
+
+1. **Link VCMail locally** (in the VCMail directory):
+   ```bash
+   cd /path/to/VCMail
+   npm link
+   ```
+
+2. **Use it in your other project** (in your other project directory):
+   ```bash
+   cd /path/to/your-other-project
+   npm link vcmail
+   ```
+
+3. **Now you can run VCMail commands** from anywhere:
+   ```bash
+   npx vcmail
+   npx vcmail verify
+   npx vcmail deploy-rules
+   ```
+
+This creates a symlink so your other project can use the local VCMail installation. Changes to VCMail will be immediately available in your linked project without needing to reinstall.
+
+**To unlink later:**
+```bash
+# In your other project
+npm unlink vcmail
+
+# In VCMail directory (optional, to remove global link)
+npm unlink -g vcmail
+```
+
 ---
 
 ## 🚀 Quick Start
