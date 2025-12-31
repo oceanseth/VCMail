@@ -1,0 +1,158 @@
+Return-Path: <bounces+5594441-c78b-nachtkraft=nachtkraft.com@recurly.twitch.tv>
+Received: from o10.recurly.twitch.tv (o10.recurly.twitch.tv [167.89.64.215])
+ by inbound-smtp.us-east-1.amazonaws.com with SMTP id r3rfp8a1ov3as5m7q5d2c9f2e683fie441kvnh81
+ for nachtkraft@nachtkraft.com;
+ Wed, 31 Dec 2025 00:20:22 +0000 (UTC)
+X-SES-Spam-Verdict: PASS
+X-SES-Virus-Verdict: PASS
+Received-SPF: pass (spfCheck: domain of recurly.twitch.tv designates 167.89.64.215 as permitted sender) client-ip=167.89.64.215; envelope-from=bounces+5594441-c78b-nachtkraft=nachtkraft.com@recurly.twitch.tv; helo=o10.recurly.twitch.tv;
+Authentication-Results: amazonses.com;
+ spf=pass (spfCheck: domain of recurly.twitch.tv designates 167.89.64.215 as permitted sender) client-ip=167.89.64.215; envelope-from=bounces+5594441-c78b-nachtkraft=nachtkraft.com@recurly.twitch.tv; helo=o10.recurly.twitch.tv;
+ dkim=pass header.i=@twitch.tv;
+ dmarc=pass header.from=twitch.tv;
+X-SES-RECEIPT: AEFBQUFBQUFBQUFHNXlkRHRWbmN2VmpzQmgxdUVkcml1dkVNOXF5cDUvbUJZUFh0Tlo2SmhkcGNJRjR4Tmh4NkZ3ZjNWTWlFVmlIWkZ4eUluNmxwN2pTSGIyQjNVekxJS2djRGVHWm5qN1dMMGt2YW5hZmpVTENJcGJxUXBSUlJuZk1CcHl0K3Q3ZkVNbWF6RWprMXF0OERiRytMQVpYbUVOQ294d3BXeFBpejFWNXZJazd5bkNodytIaUUwcTdQa0lxNDlNRmI0NEtUR0Q4ZHFtWkgwUTdTbGVnUDR4YnllN1p0b0J6Zzg0blhxZTdZSDlkNVA1QWZaOGsvaVBWY0hPUDBkZFNTeDhodWwzblN5aWM1UjVpbGF3d0JYK1U0cDR1MzlYQWNKako5cldFMXorNndlMUkwTjU3K0I0K3ljVThpOVdoQ2VxUUkyZjFDb3RqeVZsS1YwTjRMUDFBOTRVVUJ0UGRzL05objV3MUVCeGh2cDJRPT0=
+X-SES-DKIM-SIGNATURE: a=rsa-sha256; q=dns/txt; b=fSEhMMR7xQKZPf9z6Sz1RWPIfSRvxovTWRV+2nHsyQcTZvlkVCiaMPoE/YsNeMDalKjMTnBadLIwhOoQkMTtGiOlzoOaDHUG6ZhKIkOHfbGSClLMUI06EVfeR7tedzta2XM8Ch+y9sIglQs4v6ut5Ko9wkYQvoNJpfr/BrNEsaM=; c=relaxed/simple; s=6gbrjpgwjskckoa6a5zn6fwqkn67xbtw; d=amazonses.com; t=1767140423; v=1; bh=TKciSDWlBV38g9frSgDi57LjoxTjI2fYcr8M/Jdl7Ts=; h=From:To:Cc:Bcc:Subject:Date:Message-ID:MIME-Version:Content-Type:X-SES-RECEIPT;
+DKIM-Signature: v=1; a=rsa-sha256; c=relaxed/relaxed; d=twitch.tv;
+	h=date:from:subject:mime-version:to:content-type:
+	content-transfer-encoding:cc:content-type:date:from:subject:to;
+	s=s1; bh=KzgLWzVcSIJyo4lp+QFMd26PNASj/L43IVkSuy4+/pA=;
+	b=eRa0CKidLWmiRNKG+zUyX4oWb74ZEovkOXjCqoCZIPspVMdH2g7y1fmz8fsrZQpqTgge
+	EyeodBPqCUvWq5hKFGIBTWItINuO68eQCu/jl92UOwXD5/3Xjr1mApCbLGcXBx0VZ7UISA
+	Jn+zKbcpmjhzPrWPLreinAkd5SPgPT9WIoN1rwUjRD7pCudmfh8Y1umVL2SDqLD1aC4dUD
+	3qXFxqx7Nk5dvpEXpUU2vmnPw2fI05isue2MDnFc/bndIkZkeKmbxf7D2UadiUmds/aCOR
+	kHP/LoRhWzZA2zRjZU/a8WihfRPbKd8wlx6lVewFq3/O7udo3VZAfobILx4OOZXg==
+Received: by recvd-679745df5f-2zh9w with SMTP id recvd-679745df5f-2zh9w-1-69546C46-17
+	2025-12-31 00:20:22.330911464 +0000 UTC m=+1131136.240957962
+Received: from postfix-0.production1.recurly.net (unknown)
+	by geopod-ismtpd-40 (SG) with ESMTP id J2NsuVeLSpu2yDx0syCAuw
+	for <nachtkraft@nachtkraft.com>; Wed, 31 Dec 2025 00:20:22.319 +0000 (UTC)
+Date: Wed, 31 Dec 2025 00:20:22 +0000 (UTC)
+From: purchase-noreply@twitch.tv
+Message-ID: <69546c4639f56_13d5414100585@emaily-consumer-8577fb9b59-wvg9z.mail>
+Subject: Your Azizana Subscription Cancellation Confirmation
+Mime-Version: 1.0
+X-SG-EID: 
+ =?us-ascii?Q?u001=2Ex4Xn8+zYjIDlmjsACkh=2FiQN=2Fwk4HjVRazn9n5tNk6UkCBR6KH5XKzEYS2?=
+ =?us-ascii?Q?P3bFyOTgCi3inXryxazXOJU3h5iGBHAjKJzDH1e?=
+ =?us-ascii?Q?7TJ2iHA5SWIRWb=2FE2B5MzY0Z=2Fl101i8fIEKsk+X?=
+ =?us-ascii?Q?367fSkoVZX6mSxLMlZS08mJ2y4tZZHHCCfHhkYu?=
+ =?us-ascii?Q?pFbS7DD8GI2XlOsmNVzVOMHwKWWYt2lrVdVNiZb?=
+ =?us-ascii?Q?rPRgFDh0sBAKfgWqmGgB9Q=3D?=
+X-SG-ID: 
+ =?us-ascii?Q?u001=2ESdBcvi+Evd=2FbQef8eZF3BpTL9BgbK5wfSJMJGMsmprBhrCiPUZ830uaWo?=
+ =?us-ascii?Q?Pv5c4qvGjjmyh8NESHjK08DsRHMHBhY7S042b=2Fh?=
+ =?us-ascii?Q?Z3QF9B=2FY6OFa7YUaE+Vkdd9KjBJbh7w1wc7gvSG?=
+ =?us-ascii?Q?jDoeaeVQuqxXErhw8mxUe4SahAbuLJbdMTc660Z?=
+ =?us-ascii?Q?17EzgK0+F56+42+CfH?=
+To: nachtkraft@nachtkraft.com
+X-Entity-ID: u001.hA5k14sjAj9bo/acSVzBCw==
+Content-Type: multipart/mixed;
+ boundary="--==_mimepart_69546c4639d57_13d54141004bc";
+ charset=UTF-8
+Content-Transfer-Encoding: 7bit
+
+
+----==_mimepart_69546c4639d57_13d54141004bc
+Content-Type: multipart/alternative;
+ boundary="--==_mimepart_69546c4639cc5_13d541410030"
+Content-Transfer-Encoding: 7bit
+
+
+----==_mimepart_69546c4639cc5_13d541410030
+Content-Type: text/plain; charset=us-ascii
+Content-Transfer-Encoding: 7bit
+
+Canceled Subscription Confirmation
+
+Hi Seth Caldwell,
+
+This email confirms your recent cancellation to Azizana.
+As of December 31, 2025 12:20 AM, your subscription has been canceled and will not auto-renew. You will continue to enjoy your subscription benefits until Jan 19, 2026.
+Want to reactivate your subscription? Visit your page to make changes before it expires.
+
+Thank you,
+Twitch
+
+----==_mimepart_69546c4639cc5_13d541410030
+Content-Type: text/html; charset=us-ascii
+Content-Transfer-Encoding: 7bit
+
+<!DOCTYPE html><html lang="en"><head>
+        <meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+        <title>Twitch</title>
+        <style type="text/css">
+            h1, h2, td, p {
+                font-family: helvetica, arial, sans-serif;
+            }
+        </style>
+    </head>
+    <body style="background: #f1f1f1;padding: 20px;">
+        
+        <table style="width: 640px; background: #fff;">
+        <tbody><tr>
+        <td>
+            <table width="100%" cellspacing="0">
+                <tbody><tr>
+                    <td valign="top" align="center">
+                        
+                        <table width="100%" cellpadding="0" cellspacing="0" id="headerTable">
+                            <tbody><tr>
+                                <td style="padding: 50px;">
+                                       <img style="width: 147px;" src="https://static-cdn.jtvnw.net/growth-assets/email_twitch_logo_uv">
+                                    <span style="background: #f1f1f1;height: 4px;display: block;margin-top: 50px;"></span>
+                                </td>
+                            </tr>
+                        </tbody></table>
+                        
+                    </td>
+                </tr>
+            </tbody></table>
+            
+
+
+<table width="100%" cellpadding="0" cellspacing="0" style="padding: 0 50px 50px">
+    <tbody><tr>
+        <td valign="top" align="center">
+            <table width="100%" cellpadding="0" border="0" cellspacing="0">
+                <tbody><tr>
+                    <td>
+                        <h1 style="font-size:22px; color: #9147ff; margin: 0;">Canceled Subscription Confirmation</h1>
+                        <br>
+                        <table width="100%" cellpadding="0" cellspacing="0" style="margin-bottom: 10px">
+                            <tbody><tr>
+                                <td id="message-body" align="left" valign="top" style="font-size:14px;">
+                                    <p>
+                                        Hi Seth Caldwell,
+                                    </p>
+                                    <p>This email confirms your recent cancellation to Azizana.</p> 
+                                    <p>As of December 31, 2025 12:20 AM GMT, your subscription has been canceled and will not auto-renew. You will continue to enjoy your subscription benefits until Jan 19, 2026.</p>
+                                    <p>Want to reactivate your subscription? Visit your <a href="https://twitch.tv/subscriptions?tab=expired" style="color: #9147ff; text-decoration: none;">Subscriptions</a> page to make changes before it expires.</p><p>
+                                    <br>
+                                    </p><p>Thank you,<br>Twitch</p>
+                                </td>
+                            </tr>
+                        </tbody></table>
+                    </td>
+                </tr>
+            </tbody></table>
+        </td>
+    </tr>
+</tbody></table>
+</td>
+</tr><tr>
+</tr></tbody></table>
+<table style="width: 640px;border-top: 1px solid #e5e5e5">
+  <tbody><tr>
+      <td style="color: #cbcbcb; font-size: 12px;padding-top: 10px;" align="center">
+        <p style="color: #000000">
+          If you have any questions or concerns, contact <a href="https://help.twitch.tv/" style="color: #9147ff; text-decoration: none; margin-right: 10px">Twitch Customer Support.</a>
+          <br>
+          You can also <a href="https://www.twitch.tv/subscriptions" style="color: #9147ff; text-decoration: none;">manage subscriptions</a> or <a href="https://www.twitch.tv/payments?tab=payment-methods" style="color: #9147ff; text-decoration: none;">update your payment information.</a>
+        </p>        
+  </td></tr>
+</tbody></table>
+
+<img src="https://u5594441.ct.sendgrid.net/wf/open?upn=u001.5nnfZkQ4vE-2BYJG5JUkVuzSPxiuWdAZXjvrP9EY-2B3h4LZtca47PabdrVU-2B4c45MGxGtNlBFiH57k-2Fjl0rqX-2FfI-2FBA-2Fdnb7bZlJJ2OF3dvFoukH0FRTZI5OzRzxp0-2BuO2vKinjn12JhIoIACQd3NbqnxF9-2F6X0bF3-2BA0QSkFp5Qdb-2B5yM2KwQzZUuPEJdgMEI9zxNgoEsuNLEi-2ByO3mBFkNO-2Bdcq7YZW5PfBQXMMNOsctCOivMHnZ8I2naB1xwBhv6KKM80RmYMUQmGqIFllfwlsIb5atKKfs5NTyinEZ5dF7b8-2FdHas1XoZBmvXx9kYgSAzTPSSCHnrjX-2B1dW1NZslVgaYwbgKBBzX-2BggyMzWglY-3D" alt="" width="1" height="1" border="0" style="height:1px !important;width:1px !important;border-width:0 !important;margin-top:0 !important;margin-bottom:0 !important;margin-right:0 !important;margin-left:0 !important;padding-top:0 !important;padding-bottom:0 !important;padding-right:0 !important;padding-left:0 !important;"/></body></html>
+----==_mimepart_69546c4639cc5_13d541410030--
+
+----==_mimepart_69546c4639d57_13d54141004bc--

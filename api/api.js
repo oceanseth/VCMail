@@ -41,6 +41,7 @@ try {
 }
 
 const firebaseInitializer = require('../firebaseInit');
+const { decodeQuotedPrintable: decodeQuotedPrintableNew } = require('../decodeQuotedPrintable');
 
 
 let firebaseApp;
@@ -635,51 +636,12 @@ async function storeEmailForUser(username, messageId, emailData) {
 
 
 
+// Use the improved decodeQuotedPrintable function with proper UTF-8 support
 function decodeQuotedPrintable(str) {
     if (!str) return str;
     
     console.log('Decoding quoted-printable string, length:', str.length);
-    
-    // Remove soft line breaks first (=\r\n, =\n, =\r)
-    let decoded = str.replace(/=\r?\n/g, '');
-    
-    // Build a buffer from the hex sequences
-    const buffer = Buffer.alloc(decoded.length);
-    let bufferIndex = 0;
-    let i = 0;
-    
-    while (i < decoded.length) {
-        if (decoded[i] === '=' && i + 2 < decoded.length) {
-            const hex = decoded.substring(i + 1, i + 3);
-            if (/^[A-Fa-f0-9]{2}$/.test(hex)) {
-                try {
-                    buffer[bufferIndex++] = parseInt(hex, 16);
-                    i += 3;
-                    continue;
-                } catch (e) {
-                    console.warn('Failed to decode hex sequence:', hex);
-                }
-            }
-        }
-        buffer[bufferIndex++] = decoded.charCodeAt(i);
-        i++;
-    }
-    
-    // Convert buffer to UTF-8 string
-    try {
-        decoded = buffer.slice(0, bufferIndex).toString('utf8');
-    } catch (e) {
-        console.warn('Failed to convert buffer to UTF-8:', e);
-        // Fallback to original method
-        decoded = str.replace(/=\r?\n/g, '').replace(/=([A-Fa-f0-9]{2})/g, (match, hex) => {
-            try {
-                return String.fromCharCode(parseInt(hex, 16));
-            } catch (e) {
-                return match;
-            }
-        });
-    }
-    
+    const decoded = decodeQuotedPrintableNew(str);
     console.log('Decoded string preview:', decoded.substring(0, 200) + '...');
     return decoded;
 }

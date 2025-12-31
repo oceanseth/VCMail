@@ -1,0 +1,84 @@
+{
+  "description": "Test cases for decodeQuotedPrintable function with UTF-8 characters",
+  "testCases": [
+    {
+      "name": "Copyright symbol in text",
+      "input": "=C2=A9 2025 Twitch",
+      "expected": "© 2025 Twitch",
+      "description": "Copyright symbol (U+00A9) encoded as =C2=A9 in quoted-printable"
+    },
+    {
+      "name": "Mixed content with copyright",
+      "input": "Twitch =C2=A9 2025 All rights reserved",
+      "expected": "Twitch © 2025 All rights reserved",
+      "description": "Copyright symbol mixed with regular text"
+    },
+    {
+      "name": "Multiple special characters",
+      "input": "=C2=A9 Copyright =C2=AE Registered =E2=84=A2 Trademark",
+      "expected": "© Copyright ® Registered ™ Trademark",
+      "description": "Multiple UTF-8 characters: copyright, registered, trademark"
+    },
+    {
+      "name": "Email footer with copyright",
+      "input": "Thank you,\nTwitch\n\n=C2=A9 2025 Twitch Interactive, Inc.",
+      "expected": "Thank you,\nTwitch\n\n© 2025 Twitch Interactive, Inc.",
+      "description": "Email footer format with copyright symbol"
+    },
+    {
+      "name": "Soft line breaks",
+      "input": "Long line with =C2=A9 symbol=\r\ncontinues here",
+      "expected": "Long line with © symbolcontinues here",
+      "description": "Quoted-printable with soft line breaks"
+    },
+    {
+      "name": "Plain text without encoding",
+      "input": "Hello World",
+      "expected": "Hello World",
+      "description": "Regular text should pass through unchanged"
+    },
+    {
+      "name": "Em dash and en dash",
+      "input": "Test =E2=80=94 em dash =E2=80=93 en dash",
+      "expected": "Test — em dash – en dash",
+      "description": "Em dash (—) and en dash (–) characters"
+    },
+    {
+      "name": "Quotes and apostrophes",
+      "input": "=E2=80=9CQuote=E2=80=9D and =E2=80=98apostrophe=E2=80=99",
+      "expected": "\u201CQuote\u201D and \u2018apostrophe\u2019",
+      "description": "Smart quotes and apostrophes (U+201C, U+201D, U+2018, U+2019)"
+    },
+    {
+      "name": "Real email content example",
+      "input": "If you have any questions or concerns, contact Twitch Customer Support.\n=C2=A9 2025 Twitch",
+      "expected": "If you have any questions or concerns, contact Twitch Customer Support.\n© 2025 Twitch",
+      "description": "Simulated real email content with copyright"
+    },
+    {
+      "name": "Lowercase hex",
+      "input": "=c2=a9 2025",
+      "expected": "© 2025",
+      "description": "Hex sequences can be lowercase"
+    },
+    {
+      "name": "Invalid hex sequence",
+      "input": "Test =XX Invalid",
+      "expected": "Test =XX Invalid",
+      "description": "Invalid hex sequences should be left as-is"
+    },
+    {
+      "name": "Empty string",
+      "input": "",
+      "expected": "",
+      "description": "Empty string should return empty string"
+    },
+    {
+      "name": "Null input",
+      "input": null,
+      "expected": null,
+      "description": "Null input should return null"
+    }
+  ]
+}
+
