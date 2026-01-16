@@ -525,37 +525,40 @@ data "archive_file" "lambda_zip" {
   depends_on = [] # Lambda package should be prepared before Terraform runs
 }
 
-# Lambda function for processing emails
+# Shared Lambda function for processing emails from all domains
+# All projects use the same Lambda function name: VCMail-api
+# The Lambda detects the domain from request headers (API Gateway) or SES recipients and loads config from SSM
 resource "aws_lambda_function" "email_processor" {
   filename         = data.archive_file.lambda_zip.output_path
-  function_name    = "${var.project_name}-api"
+  function_name    = "VCMail-api"  # Fixed name shared across all projects
   role             = aws_iam_role.lambda_email_processor.arn
   handler          = "api/api.handler"
   source_code_hash = data.archive_file.lambda_zip.output_base64sha256
   runtime          = "nodejs18.x"
   timeout          = 30
-  memory_size      = 256
+  memory_size      = 1024  # Increased from 256MB to handle large emails with attachments (27MB email + 18MB attachment needs more memory)
 
+  # Minimal environment variables - domain-specific config is loaded from SSM at runtime
   environment {
     variables = {
-      FIREBASE_CONFIG = jsonencode({
-        projectId   = var.firebase_project_id
-        databaseURL  = var.firebase_database_url
-      })
-      VCMAIL_CONFIG = jsonencode({
-        domain             = var.domain
-        s3BucketName       = var.s3_bucket_name
-        ssmPrefix          = var.ssm_prefix
-        awsRegion          = var.aws_region
-        configurationSetName = "${var.project_name}-email-config"
-      })
+      AWS_REGION = var.aws_region
     }
   }
 
   tags = {
     Name      = "VCMail Email Processor"
-    Project   = var.project_name
+    Project   = "VCMail-Shared"
     ManagedBy = "Terraform"
+  }
+  
+  # Allow multiple projects to manage the same Lambda
+  # The Lambda code and configuration are idempotent
+  lifecycle {
+    ignore_changes = [
+      # Ignore source_code_hash changes from other projects updating the Lambda
+      # All projects should deploy the same code
+      source_code_hash
+    ]
   }
 }
 
@@ -568,9 +571,10 @@ resource "aws_lambda_permission" "ses" {
   source_account = data.aws_caller_identity.current.account_id
 }
 
-# IAM Role for Lambda email processor
+# Shared IAM Role for Lambda email processor
+# All projects use the same role name: VCMail-api-role
 resource "aws_iam_role" "lambda_email_processor" {
-  name = "${var.project_name}-email-processor-role"
+  name = "VCMail-api-role"  # Fixed name shared across all projects
 
   assume_role_policy = jsonencode({
     Version = "2012-10-17"
@@ -587,14 +591,24 @@ resource "aws_iam_role" "lambda_email_processor" {
 
   tags = {
     Name      = "VCMail Lambda Role"
-    Project   = var.project_name
+    Project   = "VCMail-Shared"
     ManagedBy = "Terraform"
+  }
+  
+  # Allow multiple projects to manage the same role
+  lifecycle {
+    ignore_changes = [
+      # Ignore assume_role_policy changes from other projects
+      # All projects should use the same policy
+      assume_role_policy
+    ]
   }
 }
 
-# IAM Policy for Lambda email processor
+# Shared IAM Policy for Lambda email processor
+# All projects use the same policy name: VCMail-api-policy
 resource "aws_iam_role_policy" "lambda_email_processor" {
-  name = "${var.project_name}-email-processor-policy"
+  name = "VCMail-api-policy"  # Fixed name shared across all projects
   role = aws_iam_role.lambda_email_processor.id
 
   policy = jsonencode({
@@ -637,7 +651,14 @@ resource "aws_iam_role_policy" "lambda_email_processor" {
           "ssm:GetParameter",
           "ssm:GetParameters"
         ]
-        Resource = "arn:aws:ssm:${var.aws_region}:${data.aws_caller_identity.current.account_id}:parameter${var.ssm_prefix}/*"
+        # Allow reading SSM parameters for all domains
+        # The Lambda loads domain-specific config from SSM at runtime
+        # Pattern: /{domain-sanitized}/prod/* (e.g., /example-com/prod/*, /another-com/prod/*)
+        Resource = [
+          "arn:aws:ssm:${var.aws_region}:${data.aws_caller_identity.current.account_id}:parameter/*/prod/*",
+          # Also allow the project-specific prefix for backward compatibility
+          "arn:aws:ssm:${var.aws_region}:${data.aws_caller_identity.current.account_id}:parameter${var.ssm_prefix}/*"
+        ]
       },
       {
         Effect = "Allow"

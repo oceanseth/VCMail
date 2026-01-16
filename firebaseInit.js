@@ -27,14 +27,19 @@ class FirebaseInitializer {
     this.firebaseAppMap = new Map();
   }
 
-  async get(databaseURL) {
+  async get(databaseURL, ssmPrefixOverride = null) {
     try {
+      // Use provided ssmPrefix or fall back to config/environment
+      const ssmPrefix = ssmPrefixOverride || config.ssmPrefix || process.env.SSM_PREFIX || '/vcmail/prod';
+      
+      // Cache key includes both databaseURL and ssmPrefix to support multiple domains
+      const cacheKey = `${databaseURL}:${ssmPrefix}`;
+      
       // Return existing instance if already initialized
-      if (this.firebaseAppMap.has(databaseURL)) {
-        return this.firebaseAppMap.get(databaseURL);
+      if (this.firebaseAppMap.has(cacheKey)) {
+        return this.firebaseAppMap.get(cacheKey);
       }
 
-      const ssmPrefix = config.ssmPrefix || process.env.SSM_PREFIX || '/vcmail/prod';
       const paramName = `${ssmPrefix}/firebase_service_account`;
       const params = {
         Name: paramName,
@@ -101,12 +106,14 @@ class FirebaseInitializer {
         }
       }
 
-    this.firebaseAppMap.set(databaseURL, admin.initializeApp({
+    const firebaseApp = admin.initializeApp({
         credential: admin.credential.cert(serviceAccount),
         databaseURL
-      }));
+      }, cacheKey); // Use cacheKey as app name to avoid conflicts
 
-      return this.firebaseAppMap.get(databaseURL);
+    this.firebaseAppMap.set(cacheKey, firebaseApp);
+
+      return this.firebaseAppMap.get(cacheKey);
     } catch (error) {
       console.error('Failed to initialize Firebase:', error);
       throw error;

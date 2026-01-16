@@ -106,6 +106,35 @@ async function main() {
       return;
     }
     
+    if (command === 'reprocess-email' || command === 'reprocess-attachments') {
+      console.log('🔄 VCMail - Reprocess Email Attachments\n');
+      
+      const emailId = args[1];
+      const folder = args[2];
+      const uid = args[3];
+      
+      if (!emailId || !folder || !uid) {
+        console.error('Error: Missing required arguments');
+        console.error('Usage: npx vcmail reprocess-email <emailId> <folder> <uid>');
+        console.error('Example: npx vcmail reprocess-email email_1767802922770 emails iOcXQr0GbhPGOwvhhWxdWpMWz833');
+        console.error('\nFolders: emails, inbox, or sent');
+        process.exit(1);
+      }
+      
+      if (!['emails', 'inbox', 'sent'].includes(folder)) {
+        console.error('Error: Folder must be one of: emails, inbox, sent');
+        process.exit(1);
+      }
+      
+      // Run the reprocessing script
+      // Modify process.argv so the script gets the arguments correctly
+      const originalArgv = process.argv.slice();
+      process.argv = [process.argv[0], path.join(__dirname, '../scripts/reprocess-email-attachments.js'), emailId, folder, uid];
+      require('../scripts/reprocess-email-attachments.js');
+      // Note: The script will call process.exit(), so we won't reach here
+      return;
+    }
+    
     // Default: Run setup wizard
     console.log('🚀 VCMail - Email Infrastructure Setup\n');
     

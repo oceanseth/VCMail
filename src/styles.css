@@ -142,6 +142,58 @@ textarea {
   background: #f8f9fa;
   border-radius: 4px;
 }
+.email-attachments-header {
+  margin: 16px 0;
+  padding: 16px;
+  background: #f8f9fa;
+  border-radius: 4px;
+}
+.email-attachments {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.email-attachments-label {
+  font-weight: 600;
+  color: #333;
+  margin-bottom: 8px;
+}
+.email-attachments-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+.attachment-item {
+  display: inline-block;
+}
+.attachment-link {
+  display: inline-flex;
+  align-items: center;
+  padding: 8px 12px;
+  background: #f0f4f8;
+  border: 1px solid #d0d7de;
+  border-radius: 6px;
+  color: #2d72d9;
+  text-decoration: none;
+  font-size: 14px;
+  transition: all 0.2s;
+}
+.attachment-link:hover {
+  background: #e8f0f7;
+  border-color: #2d72d9;
+  text-decoration: none;
+}
+.attachment-text,
+.attachment-missing {
+  display: inline-flex;
+  align-items: center;
+  padding: 8px 12px;
+  background: #f9f9f9;
+  border: 1px solid #e0e0e0;
+  border-radius: 6px;
+  color: #666;
+  font-size: 14px;
+}
 .email-detail {
   margin: 8px 0;
   display: flex;
@@ -730,6 +782,8 @@ textarea {
       font-size: 1.2em;
     }
   }
+
+
 
 
 

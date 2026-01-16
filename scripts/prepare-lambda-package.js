@@ -29,7 +29,8 @@ async function prepareLambdaPackage() {
   const filesToCopy = [
     'api',
     'src',
-    'firebaseInit.js'
+    'firebaseInit.js',
+    'decodeQuotedPrintable.js'
   ];
 
   const filesToCopySelective = {

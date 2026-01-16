@@ -112,6 +112,40 @@ class EmailCache {
     }
   }
 
+  // Create lightweight email metadata (no content/attachments)
+  createLightweightEmail(email) {
+    if (!email) return email;
+    return {
+      id: email.id,
+      subject: email.subject,
+      from: email.from,
+      to: email.to,
+      timestamp: email.timestamp,
+      read: email.read,
+      hasAttachments: email.hasAttachments,
+      attachmentCount: email.structure?.attachments?.length || email.attachmentCount || 0,
+      messageId: email.messageId,
+      contentType: email.contentType,
+      contentS3Key: email.contentS3Key, // Keep S3 key reference
+      structure: email.structure ? {
+        type: email.structure.type,
+        boundary: email.structure.boundary,
+        preferredContent: email.structure.preferredContent ? {
+          type: email.structure.preferredContent.type,
+          partKey: email.structure.preferredContent.partKey
+        } : null,
+        attachments: email.structure.attachments ? email.structure.attachments.map(att => ({
+          partKey: att.partKey,
+          filename: att.filename,
+          contentType: att.contentType,
+          size: att.size,
+          s3Key: att.s3Key,
+          isInline: att.isInline
+        })) : []
+      } : null
+    };
+  }
+
   // Add emails to cache
   addEmails(folder, emails, isLoadMore = false) {
     const cache = folder === 'inbox' ? this.inboxCache : this.sentCache;
@@ -128,7 +162,9 @@ class EmailCache {
           email.read = true;
         }
         
-        cache.set(email.id, email);
+        // Store lightweight metadata only (no content/attachments)
+        const lightweightEmail = this.createLightweightEmail(email);
+        cache.set(email.id, lightweightEmail);
         if (isLoadMore) {
           order.push(email.id); // Add to end for older emails
         } else {
@@ -191,12 +227,29 @@ class EmailCache {
         email.read = true;
       }
       
-      cache.set(email.id, email);
+      // Store lightweight metadata only (no content/attachments)
+      const lightweightEmail = this.createLightweightEmail(email);
+      cache.set(email.id, lightweightEmail);
       order.unshift(email.id); // Add to beginning for new emails
       this._maintainSize(folder);
       
       // Save to localStorage
       this.saveToStorage();
+    }
+  }
+
+  // Update email with full content (for in-memory use, doesn't persist to localStorage)
+  updateEmailWithContent(folder, emailId, fullEmail) {
+    const cache = folder === 'inbox' ? this.inboxCache : this.sentCache;
+    if (cache.has(emailId)) {
+      // Merge full content with existing metadata
+      const existing = cache.get(emailId);
+      cache.set(emailId, {
+        ...existing,
+        content: fullEmail.content,
+        structure: fullEmail.structure // Include full structure with attachment content
+      });
+      // Don't save to localStorage - this is temporary in-memory data
     }
   }
 
@@ -495,6 +548,7 @@ const emailSubject = document.getElementById('email-subject');
 const emailFrom = document.getElementById('email-from');
 const emailTo = document.getElementById('email-to');
 const emailDate = document.getElementById('email-date');
+const emailAttachmentsHeader = document.getElementById('email-attachments-header');
 const emailContent = document.getElementById('email-content');
 const userEmailDisplay = document.getElementById('user-email-display');
 
@@ -630,8 +684,8 @@ async function handleEmailPasswordAuth() {
   }
 }
 
-composeBtn.addEventListener('click', () => {
-  showComposeView();
+composeBtn.addEventListener('click', async () => {
+  await showComposeView();
 });
 
 backToInboxBtn.addEventListener('click', () => {
@@ -642,9 +696,9 @@ backToInboxComposeBtn.addEventListener('click', () => {
   showInboxView();
 });
 
-replyBtn.addEventListener('click', () => {
+replyBtn.addEventListener('click', async () => {
   replyingTo = viewingEmail;
-  showComposeView();
+  await showComposeView();
 });
 
 deleteEmailBtn.addEventListener('click', async () => {
@@ -787,7 +841,183 @@ function formatPlainTextAsHtml(text) {
   return formattedParagraphs.map(p => `<p>${p}</p>`).join('');
 }
 
-function showEmailView(email) {
+// Load full email content from S3 (including body and attachments)
+async function loadEmailFromS3(emailId, folder = 'inbox') {
+  if (!userUid || !emailId) {
+    console.error(`❌ loadEmailFromS3: Missing userUid (${userUid}) or emailId (${emailId})`);
+    return null;
+  }
+  
+  try {
+    console.log(`📧 loadEmailFromS3 called:`, {
+      emailId: emailId,
+      folder: folder,
+      userUid: userUid,
+      apiEndpoint: config.apiEndpoint || '(empty)'
+    });
+    
+    // Get Firebase ID token for authentication
+    const idToken = await currentUser.getIdToken();
+    console.log(`✅ Got Firebase ID token (length: ${idToken.length})`);
+    
+    // Call loadEmail API to get presigned S3 URLs
+    const apiEndpoint = config.apiEndpoint || '';
+    const apiPath = `${apiEndpoint}/api/loadEmail?emailId=${encodeURIComponent(emailId)}&folder=${folder === 'inbox' ? 'emails' : 'sent'}`;
+    console.log(`📡 Calling API: ${apiPath}`);
+    
+    const apiResponse = await fetch(apiPath, {
+      method: 'GET',
+      headers: {
+        'Authorization': `Bearer ${idToken}`
+      }
+    });
+    
+    console.log(`📡 API response status: ${apiResponse.status} ${apiResponse.statusText}`);
+    
+    if (!apiResponse.ok) {
+      const errorText = await apiResponse.text();
+      console.error(`❌ Failed to load email from API:`, {
+        status: apiResponse.status,
+        statusText: apiResponse.statusText,
+        body: errorText
+      });
+      throw new Error(`Failed to load email: ${apiResponse.status} - ${errorText}`);
+    }
+    
+    const apiData = await apiResponse.json();
+    console.log(`✅ Loaded email metadata from API:`, {
+      emailId: apiData.emailId,
+      hasContentUrl: !!apiData.contentUrl,
+      hasContent: !!apiData.content,
+      contentType: apiData.contentType,
+      attachmentsCount: apiData.attachments?.length || 0,
+      metadata: {
+        subject: apiData.metadata?.subject,
+        hasAttachments: apiData.metadata?.hasAttachments,
+        structureAttachments: apiData.metadata?.structure?.attachments?.length || 0
+      }
+    });
+    
+    // Fetch email content from S3 or use direct content (backward compatibility)
+    let emailContent = null;
+    
+    if (apiData.content) {
+      // Old format: content is directly in the API response
+      emailContent = apiData.content;
+      console.log(`✅ Email content from API response (${emailContent.length} characters)`);
+    } else if (apiData.contentUrl) {
+      // New format: fetch from S3
+      console.log(`📦 Fetching email content from S3 URL: ${apiData.contentUrl.substring(0, 100)}...`);
+      const contentResponse = await fetch(apiData.contentUrl, {
+        method: 'GET',
+        mode: 'cors',
+        cache: 'no-cache'
+      });
+      
+      console.log(`📦 S3 response status: ${contentResponse.status} ${contentResponse.statusText}`);
+      
+      if (!contentResponse.ok) {
+        const errorText = await contentResponse.text();
+        console.error(`❌ Failed to fetch from S3:`, {
+          status: contentResponse.status,
+          statusText: contentResponse.statusText,
+          body: errorText.substring(0, 200)
+        });
+        throw new Error(`Failed to fetch email content from S3: ${contentResponse.status}`);
+      }
+      
+      emailContent = await contentResponse.text();
+      console.log(`✅ Email content fetched from S3 (${emailContent.length} characters)`);
+    } else {
+      console.error(`❌ No content URL or content available in API response`);
+      throw new Error('No content URL or content available');
+    }
+    
+    // Fetch attachments from S3 if any
+    const attachments = [];
+    if (apiData.attachments && apiData.attachments.length > 0) {
+      console.log(`📎 Fetching ${apiData.attachments.length} attachments from S3...`);
+      for (let i = 0; i < apiData.attachments.length; i++) {
+        const attachment = apiData.attachments[i];
+        console.log(`📎 Attachment ${i + 1}/${apiData.attachments.length}:`, {
+          filename: attachment.filename,
+          contentType: attachment.contentType,
+          size: attachment.size,
+          hasUrl: !!attachment.url,
+          hasContent: !!attachment.content,
+          isInline: attachment.isInline
+        });
+        
+        try {
+          if (attachment.content) {
+            // Attachment content already included (old format - embedded content)
+            console.log(`✅ Attachment ${i + 1} has content embedded`);
+            attachments.push(attachment);
+          } else if (attachment.url) {
+            // Use presigned S3 URL directly for all attachments (no fetch/conversion needed)
+            // This is more reliable and avoids CORS/memory issues
+            console.log(`📦 Using presigned URL for attachment ${i + 1} (size: ${attachment.size || 'unknown'}, URL: ${attachment.url.substring(0, 100)}...)`);
+            attachments.push(attachment);
+          } else {
+            console.warn(`⚠️ Attachment ${i + 1} has no URL or content`);
+          }
+        } catch (attError) {
+          console.error(`❌ Error fetching attachment ${i + 1}:`, attError);
+        }
+      }
+      console.log(`✅ Successfully fetched ${attachments.length}/${apiData.attachments.length} attachments`);
+    } else {
+      console.log(`📎 No attachments to fetch (apiData.attachments: ${apiData.attachments?.length || 0})`);
+    }
+    
+    // Combine metadata from API with content from S3
+    const fullEmail = {
+      id: emailId,
+      ...apiData.metadata,
+      content: emailContent
+    };
+    
+    // Add attachments to email object (both top-level and structure for compatibility)
+    if (attachments.length > 0) {
+      fullEmail.attachments = attachments;
+      if (fullEmail.structure) {
+        fullEmail.structure.attachments = attachments;
+      } else {
+        // Create structure if it doesn't exist
+        fullEmail.structure = { attachments: attachments };
+      }
+    }
+    
+    // Update cache with full content (in-memory only)
+    // Use the folder parameter that was passed in
+    emailCache.updateEmailWithContent(folder, emailId, fullEmail);
+    
+    console.log(`📧 Full email content loaded from S3: ${emailId}`);
+    return fullEmail;
+    
+  } catch (error) {
+    console.error(`📧 Error fetching email content from S3:`, error);
+    return null;
+  }
+}
+
+async function showEmailView(email) {
+  console.log('📧 showEmailView called with email:', {
+    id: email.id,
+    subject: email.subject,
+    from: email.from,
+    hasContent: !!email.content,
+    hasContentS3Key: !!email.contentS3Key,
+    contentS3Key: email.contentS3Key,
+    hasAttachments: email.hasAttachments,
+    attachmentCount: email.attachmentCount,
+    hasStructure: !!email.structure,
+    structureAttachments: email.structure?.attachments?.length || 0,
+    attachmentsS3: email.attachmentsS3?.length || 0,
+    contentType: email.contentType,
+    messageId: email.messageId
+  });
+  
   hideAllSections();
   emailViewSection.classList.remove('hidden');
   appContainer.classList.add('email-view-mode');
@@ -805,55 +1035,180 @@ function showEmailView(email) {
   emailTo.textContent = email.to;
   emailDate.textContent = new Date(email.timestamp).toLocaleString();
   
+  // Clear attachments header
+  if (emailAttachmentsHeader) {
+    emailAttachmentsHeader.innerHTML = '';
+  }
+  
+  // Show loading state
+  emailContent.innerHTML = '<div class="loading">Loading email content...</div>';
+  
+  // Check if email has contentS3Key (needs to be loaded from S3)
+  // Also check if email has no content at all (might be old email or needs loading)
+  // Old emails might have messageId pointing to SES S3 location but no contentS3Key
+  let fullEmail = email;
+  
+  const hasContentS3Key = !!email.contentS3Key;
+  const hasContent = !!email.content && email.content.length > 0;
+  const hasMessageId = !!email.messageId;
+  
+  // Need to load if:
+  // 1. Has contentS3Key but no content, OR
+  // 2. No content at all (might be old email that needs loading from SES location)
+  const needsLoading = (hasContentS3Key && !hasContent) || (!hasContent && hasMessageId);
+  
+  console.log(`📧 Email loading check:`, {
+    needsLoading: needsLoading,
+    hasContentS3Key: hasContentS3Key,
+    hasContent: hasContent,
+    hasMessageId: hasMessageId,
+    messageId: email.messageId,
+    hasAttachments: email.hasAttachments,
+    contentS3Key: email.contentS3Key
+  });
+  
+  if (needsLoading) {
+    console.log(`📧 Email needs content loaded, calling loadEmailFromS3...`);
+    const folder = currentFolder === 'inbox' ? 'inbox' : 'sent';
+    const loadedEmail = await loadEmailFromS3(email.id, folder);
+    
+    console.log(`📧 loadEmailFromS3 returned:`, {
+      success: !!loadedEmail,
+      hasContent: !!loadedEmail?.content,
+      contentLength: loadedEmail?.content?.length || 0,
+      hasAttachments: loadedEmail?.structure?.attachments?.length || 0
+    });
+    
+    if (loadedEmail && loadedEmail.content) {
+      fullEmail = loadedEmail;
+      console.log(`✅ Using loaded email with content length: ${fullEmail.content?.length || 0}`);
+    } else if (!email.content) {
+      // Failed to load from S3 and no content available
+      console.error(`❌ Failed to load email content and no fallback content available`);
+      emailContent.innerHTML = '<div class="error">Failed to load email content. The email may need to be reprocessed. Please contact support.</div>';
+      return;
+    } else {
+      console.log(`⚠️ Failed to load from S3, but using existing content (backward compatibility)`);
+    }
+  } else {
+    console.log(`📧 Email already has content, using directly (length: ${email.content?.length || 0})`);
+  }
+  
+  console.log(`📧 Final email data for display:`, {
+    hasContent: !!fullEmail.content,
+    contentLength: fullEmail.content?.length || 0,
+    hasAttachments: fullEmail.hasAttachments,
+    structureAttachments: fullEmail.structure?.attachments?.length || 0,
+    contentType: fullEmail.contentType
+  });
+  
   // Build email content with attachments
   let contentHtml = '';
   
-  // Add attachment section if there are attachments
-  if (email.hasAttachments && email.structure && email.structure.attachments && email.structure.attachments.length > 0) {
-    contentHtml += '<div class="attachments-section">';
-    contentHtml += '<h4>Attachments:</h4>';
-    contentHtml += '<ul class="attachments-list">';
+  console.log(`📧 Building email HTML:`, {
+    hasAttachments: fullEmail.hasAttachments,
+    structureAttachments: fullEmail.structure?.attachments?.length || 0,
+    hasContent: !!fullEmail.content,
+    contentLength: fullEmail.content?.length || 0
+  });
+  
+  // Display attachments in header section (not in content)
+  // Check both top-level attachments (from API) and structure.attachments (old format)
+  const attachmentsToShow = fullEmail.attachments || fullEmail.structure?.attachments || [];
+  console.log(`📎 Attachments to display: ${attachmentsToShow.length}`);
+  console.log(`📎 Attachment sources:`, {
+    hasTopLevelAttachments: !!fullEmail.attachments,
+    topLevelCount: fullEmail.attachments?.length || 0,
+    hasStructureAttachments: !!fullEmail.structure?.attachments,
+    structureCount: fullEmail.structure?.attachments?.length || 0
+  });
+  
+  if (attachmentsToShow.length > 0) {
+    let attachmentsHtml = '<div class="email-attachments">';
+    attachmentsHtml += '<div class="email-attachments-label">Attachments:</div>';
+    attachmentsHtml += '<div class="email-attachments-list">';
     
-    email.structure.attachments.forEach((attachment, index) => {
+    attachmentsToShow.forEach((attachment, index) => {
       const filename = attachment.filename || `attachment-${index + 1}`;
       const size = attachment.size ? ` (${formatFileSize(attachment.size)})` : '';
+      const escapedFilename = filename.replace(/"/g, '&quot;').replace(/'/g, '&#39;');
       
-      if (attachment.content) {
-        // For text-based attachments, create a download link with data URL
+      if (attachment.url) {
+        // Use S3 presigned URL directly (preferred)
+        attachmentsHtml += `<div class="attachment-item"><a href="${attachment.url}" download="${escapedFilename}" class="attachment-link" target="_blank">📎 ${filename}${size}</a></div>`;
+      } else if (attachment.content) {
+        // For attachments with embedded content, create a download link with data URL
         const mimeType = attachment.contentType || 'application/octet-stream';
         
         // Handle UTF-8 encoding properly for btoa
         let base64Content;
         try {
-          // Convert string to UTF-8 bytes, then to base64
-          const utf8Bytes = new TextEncoder().encode(attachment.content);
-          base64Content = btoa(String.fromCharCode(...utf8Bytes));
+          if (attachment.encoding === 'base64') {
+            // Already base64 encoded
+            base64Content = attachment.content;
+          } else {
+            // Convert string to UTF-8 bytes, then to base64
+            const utf8Bytes = new TextEncoder().encode(attachment.content);
+            base64Content = btoa(String.fromCharCode(...utf8Bytes));
+          }
           
           const dataUrl = `data:${mimeType};base64,${base64Content}`;
-          contentHtml += `<li><a href="${dataUrl}" download="${filename}" class="attachment-link">📎 ${filename}${size}</a></li>`;
+          attachmentsHtml += `<div class="attachment-item"><a href="${dataUrl}" download="${escapedFilename}" class="attachment-link">📎 ${filename}${size}</a></div>`;
         } catch (e) {
           console.warn('Failed to encode attachment as base64:', e);
           // Fallback: show as text content instead of download link
-          contentHtml += `<li><span class="attachment-text">📎 ${filename}${size} (text content available)</span></li>`;
+          attachmentsHtml += `<div class="attachment-item"><span class="attachment-text">📎 ${filename}${size} (text content available)</span></div>`;
         }
       } else {
         // For binary attachments or missing content, show filename only
-        contentHtml += `<li><span class="attachment-missing">📎 ${filename}${size} (content not available)</span></li>`;
+        attachmentsHtml += `<div class="attachment-item"><span class="attachment-missing">📎 ${filename}${size} (content not available)</span></div>`;
       }
     });
     
-    contentHtml += '</ul></div>';
+    attachmentsHtml += '</div></div>';
+    
+    // Add to header section
+    if (emailAttachmentsHeader) {
+      emailAttachmentsHeader.innerHTML = attachmentsHtml;
+    }
+  } else {
+    // Clear attachments header if no attachments
+    if (emailAttachmentsHeader) {
+      emailAttachmentsHeader.innerHTML = '';
+    }
   }
   
   // Add the main email content
   contentHtml += '<div class="email-body">';
-  contentHtml += extractAndDisplayEmailBody(email);
+  const bodyContent = extractAndDisplayEmailBody(fullEmail);
+  console.log(`📧 Email body content:`, {
+    hasContent: !!bodyContent,
+    contentLength: bodyContent?.length || 0,
+    contentType: fullEmail.contentType,
+    preview: bodyContent?.substring(0, 200) || '(empty)'
+  });
+  
+  if (!bodyContent || bodyContent.trim().length === 0) {
+    console.warn(`⚠️ Email body content is empty!`);
+    contentHtml += '<div class="warning">Email content is empty or could not be loaded.</div>';
+  } else {
+    contentHtml += bodyContent;
+  }
   contentHtml += '</div>';
   
+  console.log(`📧 Final HTML to render:`, {
+    totalLength: contentHtml.length,
+    hasAttachments: contentHtml.includes('attachments-section'),
+    hasBody: contentHtml.includes('email-body'),
+    attachmentCount: (contentHtml.match(/attachment-link/g) || []).length
+  });
+  
   emailContent.innerHTML = contentHtml;
+  
+  console.log(`✅ Email view rendered successfully`);
 }
 
-function showComposeView() {
+async function showComposeView() {
   hideAllSections();
   composeSection.classList.remove('hidden');
   appContainer.classList.remove('email-view-mode');
@@ -869,7 +1224,16 @@ function showComposeView() {
   if (replyingTo) {
     toInput.value = replyingTo.from;
     subjectInput.value = replyingTo.subject.startsWith('Re:') ? replyingTo.subject : 'Re: ' + replyingTo.subject;
-    bodyInput.value = `\n\n--- Original message ---\n${replyingTo.content}`;
+    // Load email content if needed for reply
+    let replyContent = replyingTo.content;
+    if (replyingTo.contentS3Key && !replyingTo.content) {
+      const folder = currentFolder === 'inbox' ? 'inbox' : 'sent';
+      const loadedEmail = await loadEmailFromS3(replyingTo.id, folder);
+      if (loadedEmail && loadedEmail.content) {
+        replyContent = loadedEmail.content;
+      }
+    }
+    bodyInput.value = `\n\n--- Original message ---\n${replyContent}`;
   } else {
     toInput.value = '';
     subjectInput.value = '';
