@@ -9,6 +9,71 @@ const fs = require('fs-extra');
 const path = require('path');
 const { execSync } = require('child_process');
 
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function isRetryableFsLockError(err) {
+  if (!err) return false;
+  const code = err.code;
+  if (code === 'EBUSY' || code === 'EPERM' || code === 'ENOTEMPTY' || code === 'EMFILE') return true;
+  const msg = String(err.message || err.syscall || '');
+  return /EBUSY|resource busy|locked/i.test(msg);
+}
+
+/**
+ * Remove a directory tree; on Windows, cancelling `npx vcmail` often leaves file locks in
+ * `node_modules` so a single fs.remove fails with EBUSY. Retry with backoff, then rename away
+ * and rebuild so the next run is not blocked.
+ */
+async function removeLambdaPackageTreeWithRetry(dir, { label = 'vcmail-lambda-package', maxRemoveAttempts = 12 } = {}) {
+  if (!(await fs.pathExists(dir))) {
+    return;
+  }
+
+  let lastErr;
+  for (let attempt = 1; attempt <= maxRemoveAttempts; attempt++) {
+    try {
+      await fs.remove(dir);
+      return;
+    } catch (err) {
+      lastErr = err;
+      if (!isRetryableFsLockError(err)) {
+        throw err;
+      }
+      const delayMs = Math.min(4000, 200 * 2 ** (attempt - 1));
+      console.warn(
+        `  ⚠ ${label} is locked (${err.code || 'EBUSY'}); waiting ${delayMs}ms before retry ${attempt}/${maxRemoveAttempts}…`
+      );
+      await sleep(delayMs);
+    }
+  }
+
+  const trashDir = `${dir}.trash-${Date.now()}`;
+  try {
+    await fs.move(dir, trashDir, { overwrite: false });
+    console.warn(
+      `  ⚠ Renamed locked ${label} to ${path.basename(trashDir)}. Building a fresh package; delete the .trash-* folder later if it remains.`
+    );
+    setImmediate(() => {
+      void removeLambdaPackageTreeWithRetry(trashDir, {
+        label: path.basename(trashDir),
+        maxRemoveAttempts: 6
+      }).catch(() => {});
+    });
+    return;
+  } catch (moveErr) {
+    const hint =
+      'Another process may still be using this folder (cancelled npx vcmail, IDE, terminal, or antivirus). ' +
+      'Close it, wait a few seconds, or delete/rename `vcmail-lambda-package` manually, then run again.';
+    const wrap = new Error(
+      `Could not remove or rename ${dir}: ${lastErr && lastErr.message}. ${hint}`
+    );
+    wrap.cause = lastErr || moveErr;
+    throw wrap;
+  }
+}
+
 // Find the vcmail package directory (where this script is located)
 // This script is in node_modules/vcmail/scripts/, so go up one level
 const VCMAIL_PACKAGE_ROOT = path.join(__dirname, '..');
@@ -19,10 +84,8 @@ const LAMBDA_PACKAGE_DIR = path.join(PROJECT_ROOT, 'vcmail-lambda-package');
 async function prepareLambdaPackage() {
   console.log('📦 Preparing Lambda deployment package...\n');
 
-  // Clean and create vcmail-lambda-package directory
-  if (await fs.pathExists(LAMBDA_PACKAGE_DIR)) {
-    await fs.remove(LAMBDA_PACKAGE_DIR);
-  }
+  // Clean and create vcmail-lambda-package directory (handles Windows EBUSY after cancelled runs)
+  await removeLambdaPackageTreeWithRetry(LAMBDA_PACKAGE_DIR);
   await fs.ensureDir(LAMBDA_PACKAGE_DIR);
 
   // Copy necessary files
@@ -32,10 +95,6 @@ async function prepareLambdaPackage() {
     'firebaseInit.js',
     'decodeQuotedPrintable.js'
   ];
-
-  const filesToCopySelective = {
-    'lib/config.js': 'lib/config.js'
-  };
 
   console.log('Copying Lambda code files from vcmail package...');
   console.log(`  Source: ${VCMAIL_PACKAGE_ROOT}`);
@@ -53,19 +112,6 @@ async function prepareLambdaPackage() {
     }
   }
 
-  for (const [src, dest] of Object.entries(filesToCopySelective)) {
-    // Copy from vcmail package directory, not from user's project
-    const srcPath = path.join(VCMAIL_PACKAGE_ROOT, src);
-    const destPath = path.join(LAMBDA_PACKAGE_DIR, dest);
-    if (await fs.pathExists(srcPath)) {
-      await fs.ensureDir(path.dirname(destPath));
-      await fs.copy(srcPath, destPath);
-      console.log(`  ✓ Copied ${src} from vcmail package`);
-    } else {
-      console.warn(`  ⚠ File not found in vcmail package: ${srcPath}`);
-    }
-  }
-
   // Copy package.json and install only production dependencies
   console.log('\nInstalling production dependencies...');
   // Read package.json from vcmail package, not from user's project
@@ -77,7 +123,11 @@ async function prepareLambdaPackage() {
     version: packageJson.version,
     dependencies: {
       'firebase-admin': packageJson.dependencies['firebase-admin'] || '^11.11.0',
-      'aws-sdk': packageJson.dependencies['aws-sdk'] || '^2.1531.0'
+      '@aws-sdk/client-s3': packageJson.dependencies['@aws-sdk/client-s3'] || '^3.758.0',
+      '@aws-sdk/client-ssm': packageJson.dependencies['@aws-sdk/client-ssm'] || '^3.758.0',
+      '@aws-sdk/client-ses': packageJson.dependencies['@aws-sdk/client-ses'] || '^3.758.0',
+      '@aws-sdk/s3-request-presigner': packageJson.dependencies['@aws-sdk/s3-request-presigner'] || '^3.758.0',
+      'fs-extra': packageJson.dependencies['fs-extra'] || '^11.2.0'
     }
   };
 

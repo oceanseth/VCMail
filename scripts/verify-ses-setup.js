@@ -4,7 +4,17 @@
  * Checks SES domain verification, sandbox mode, and related infrastructure
  */
 
-const AWS = require('aws-sdk');
+const {
+  SESClient,
+  GetSendQuotaCommand,
+  GetIdentityVerificationAttributesCommand,
+  GetIdentityDkimAttributesCommand,
+  DescribeActiveReceiptRuleSetCommand
+} = require('@aws-sdk/client-ses');
+const { LambdaClient, GetFunctionCommand } = require('@aws-sdk/client-lambda');
+const { APIGatewayClient, GetRestApisCommand, GetStagesCommand } = require('@aws-sdk/client-api-gateway');
+const { Route53Client, ListHostedZonesByNameCommand, ListResourceRecordSetsCommand } = require('@aws-sdk/client-route-53');
+const { S3Client, HeadBucketCommand, ListObjectsV2Command } = require('@aws-sdk/client-s3');
 const { getConfigWithDefaults } = require('../lib/config');
 const fs = require('fs-extra');
 const path = require('path');
@@ -22,7 +32,7 @@ async function verifySESSetup() {
   
   const config = getConfigWithDefaults(await fs.readJson(configPath));
   const region = config.awsRegion || 'us-east-1';
-  const ses = new AWS.SES({ region });
+  const ses = new SESClient({ region });
   
   console.log(`📧 Domain: ${config.domain}`);
   console.log(`🌍 AWS Region: ${region}\n`);
@@ -42,7 +52,7 @@ async function verifySESSetup() {
     console.log(`   Account Sending Enabled: ${accountInfo.Enabled ? '✅ Yes' : '❌ No'}`);
     
     // Check sandbox mode by trying to get sending quota
-    const sendingQuota = await ses.getSendQuota().promise();
+    const sendingQuota = await ses.send(new GetSendQuotaCommand({}));
     console.log(`   Max Send Rate: ${sendingQuota.MaxSendRate} emails/second`);
     console.log(`   Max 24 Hour Send: ${sendingQuota.Max24HourSend} emails`);
     
@@ -61,9 +71,9 @@ async function verifySESSetup() {
   // 2. Check Domain Verification
   console.log('\n2️⃣ Checking Domain Verification...');
   try {
-    const domainIdentity = await ses.getIdentityVerificationAttributes({
+    const domainIdentity = await ses.send(new GetIdentityVerificationAttributesCommand({
       Identities: [config.domain]
-    }).promise();
+    }));
     
     const verification = domainIdentity.VerificationAttributes[config.domain];
     if (verification) {
@@ -88,9 +98,9 @@ async function verifySESSetup() {
   // 3. Check DKIM
   console.log('\n3️⃣ Checking DKIM Configuration...');
   try {
-    const dkim = await ses.getIdentityDkimAttributes({
+    const dkim = await ses.send(new GetIdentityDkimAttributesCommand({
       Identities: [config.domain]
-    }).promise();
+    }));
     
     const dkimAttrs = dkim.DkimAttributes[config.domain];
     if (dkimAttrs) {
@@ -113,24 +123,25 @@ async function verifySESSetup() {
   // 4. Check Lambda Function
   console.log('\n4️⃣ Checking Lambda Function...');
   try {
-    const lambda = new AWS.Lambda({ region });
-    const functionName = `${config.projectName || config.domain.replace(/\./g, '-')}-api`;
+    const lambda = new LambdaClient({ region });
+    const functionName = 'VCMail-api';  // Shared Lambda name for all projects
     
     try {
-      const func = await lambda.getFunction({ FunctionName: functionName }).promise();
+      const func = await lambda.send(new GetFunctionCommand({ FunctionName: functionName }));
       console.log(`   ✅ Lambda function "${functionName}" exists`);
       console.log(`   Runtime: ${func.Configuration.Runtime}`);
       console.log(`   Last Modified: ${func.Configuration.LastModified}`);
+      console.log(`   📝 Note: This is a shared Lambda function that loads domain-specific config from SSM`);
       
-      // Check environment variables
+      // Check environment variables (should be minimal since config is loaded from SSM)
       if (func.Configuration.Environment && func.Configuration.Environment.Variables) {
         const env = func.Configuration.Environment.Variables;
         console.log(`   Environment Variables:`);
-        console.log(`      - Domain: ${env.VCMAIL_CONFIG ? JSON.parse(env.VCMAIL_CONFIG).domain : 'N/A'}`);
-        console.log(`      - Firebase Config: ${env.FIREBASE_CONFIG ? '✅ Set' : '❌ Missing'}`);
+        console.log(`      - AWS_REGION: ${env.AWS_REGION || 'Auto-detected by Lambda'}`);
+        console.log(`      - Domain-specific config loaded from SSM at runtime`);
       }
     } catch (error) {
-      if (error.code === 'ResourceNotFoundException') {
+      if (error.name === 'ResourceNotFoundException' || error.code === 'ResourceNotFoundException') {
         console.log(`   ❌ Lambda function "${functionName}" NOT FOUND`);
         console.log('   📝 Run "npx vcmail" to deploy Lambda function');
       } else {
@@ -144,10 +155,10 @@ async function verifySESSetup() {
   // 5. Check API Gateway
   console.log('\n5️⃣ Checking API Gateway...');
   try {
-    const apigateway = new AWS.APIGateway({ region });
+    const apigateway = new APIGatewayClient({ region });
     const apiName = `${config.projectName || config.domain.replace(/\./g, '-')}-api`;
     
-    const apis = await apigateway.getRestApis({ limit: 500 }).promise();
+    const apis = await apigateway.send(new GetRestApisCommand({ limit: 500 }));
     const api = apis.items.find(a => a.name === apiName);
     
     if (api) {
@@ -155,7 +166,7 @@ async function verifySESSetup() {
       console.log(`   ID: ${api.id}`);
       
       // Check stages
-      const stages = await apigateway.getStages({ restApiId: api.id }).promise();
+      const stages = await apigateway.send(new GetStagesCommand({ restApiId: api.id }));
       if (stages.item && stages.item.length > 0) {
         const prodStage = stages.item.find(s => s.stageName === 'prod');
         if (prodStage) {
@@ -176,19 +187,19 @@ async function verifySESSetup() {
   // 6. Check DNS Records (Route53)
   console.log('\n6️⃣ Checking DNS Records...');
   try {
-    const route53 = new AWS.Route53();
+    const route53 = new Route53Client({});
     
     // Get hosted zone
-    const zones = await route53.listHostedZonesByName({ DNSName: config.domain }).promise();
+    const zones = await route53.send(new ListHostedZonesByNameCommand({ DNSName: config.domain }));
     const zone = zones.HostedZones.find(z => z.Name === `${config.domain}.`);
     
     if (zone) {
       console.log(`   ✅ Hosted zone found: ${zone.Name}`);
       
       // Check MX record
-      const records = await route53.listResourceRecordSets({
+      const records = await route53.send(new ListResourceRecordSetsCommand({
         HostedZoneId: zone.Id
-      }).promise();
+      }));
       
       const mxRecord = records.ResourceRecordSets.find(r => 
         r.Name === `${config.domain}.` && r.Type === 'MX'
@@ -243,6 +254,75 @@ async function verifySESSetup() {
     }
   } catch (error) {
     console.log(`   ⚠️  Error checking DNS records: ${error.message}`);
+  }
+
+  // 7. Check inbox S3 bucket (where SES stores incoming emails)
+  console.log('\n7️⃣ Checking inbox S3 bucket (incoming emails)...');
+  try {
+    const s3 = new S3Client({ region });
+
+    // First, try to discover the bucket SES is actually writing to from the active rule set
+    let sesInboxBucket = null;
+    try {
+      const activeRuleSet = await ses.send(new DescribeActiveReceiptRuleSetCommand({}));
+      const rules = activeRuleSet?.Rules || [];
+      const ruleForDomain = rules.find(r =>
+        Array.isArray(r.Recipients) && r.Recipients.includes(config.domain)
+      );
+
+      if (ruleForDomain) {
+        const s3Action = (ruleForDomain.Actions || []).find(a => a.S3Action);
+        if (s3Action && s3Action.S3Action && s3Action.S3Action.BucketName) {
+          sesInboxBucket = s3Action.S3Action.BucketName;
+          console.log(`   Inbox bucket from SES receipt rule: ${sesInboxBucket}`);
+        } else {
+          console.log('   ⚠️  SES rule for this domain has no S3 action configured');
+        }
+      } else {
+        console.log('   ⚠️  No SES receipt rule found for this domain in the active rule set');
+      }
+    } catch (ruleError) {
+      console.log(`   ⚠️  Could not inspect SES receipt rules for inbox bucket: ${ruleError.message}`);
+    }
+
+    // Also compute the expected bucket name from config/terraform defaults
+    const derivedInboxBucket = config.s3BucketName;
+    console.log(`   Inbox bucket derived from config: ${derivedInboxBucket}`);
+
+    if (sesInboxBucket && sesInboxBucket !== derivedInboxBucket) {
+      console.log('   ⚠️  MISMATCH: SES is configured to write to a different bucket than the derived one above.');
+    }
+
+    // Prefer the SES-configured bucket if available, otherwise fall back to derived name
+    const inboxBucket = sesInboxBucket || derivedInboxBucket;
+
+    // Verify the chosen bucket exists
+    await s3.send(new HeadBucketCommand({ Bucket: inboxBucket }));
+    console.log(`   ✅ Bucket exists: ${inboxBucket}`);
+
+    // List a few recent objects to help debug incoming mail
+    const listed = await s3.send(new ListObjectsV2Command({
+      Bucket: inboxBucket,
+      MaxKeys: 50
+    }));
+
+    if (!listed.Contents || listed.Contents.length === 0) {
+      console.log('   ⚠️  Bucket is currently empty (no stored emails found)');
+    } else {
+      // Sort by LastModified descending to find latest object
+      const sorted = listed.Contents.slice().sort(
+        (a, b) => new Date(b.LastModified) - new Date(a.LastModified)
+      );
+      const latest = sorted[0];
+
+      console.log('   ✅ Found stored emails in inbox bucket');
+      console.log(`   Latest email object key: ${latest.Key}`);
+      console.log(`   Last modified (UTC): ${latest.LastModified}`);
+      console.log('   ℹ️  To inspect this email with AWS CLI:');
+      console.log(`      aws s3 cp "s3://${inboxBucket}/${latest.Key}" -`);
+    }
+  } catch (error) {
+    console.log(`   ⚠️  Error checking inbox S3 bucket: ${error.message}`);
   }
   
   console.log('\n✅ Verification complete!');

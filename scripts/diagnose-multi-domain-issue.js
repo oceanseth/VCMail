@@ -4,7 +4,19 @@
  * Diagnoses why emails aren't being delivered for a specific domain
  */
 
-const AWS = require('aws-sdk');
+const {
+  SESClient,
+  DescribeActiveReceiptRuleSetCommand,
+  GetIdentityVerificationAttributesCommand
+} = require('@aws-sdk/client-ses');
+const { LambdaClient, ListFunctionsCommand, GetFunctionCommand } = require('@aws-sdk/client-lambda');
+const {
+  CloudWatchLogsClient,
+  DescribeLogStreamsCommand,
+  GetLogEventsCommand
+} = require('@aws-sdk/client-cloudwatch-logs');
+const { Route53Client, ListHostedZonesByNameCommand, ListResourceRecordSetsCommand } = require('@aws-sdk/client-route-53');
+const execa = require('execa');
 const { getConfigWithDefaults } = require('../lib/config');
 const fs = require('fs-extra');
 const path = require('path');
@@ -22,8 +34,9 @@ async function diagnoseMultiDomainIssue() {
   
   const config = getConfigWithDefaults(await fs.readJson(configPath));
   const region = config.awsRegion || 'us-east-1';
-  const ses = new AWS.SES({ region });
-  const lambda = new AWS.Lambda({ region });
+  const ses = new SESClient({ region });
+  const lambda = new LambdaClient({ region });
+  const cloudwatchlogs = new CloudWatchLogsClient({ region });
   
   console.log(`📧 Configured Domain: ${config.domain}`);
   console.log(`🌍 AWS Region: ${region}\n`);
@@ -31,7 +44,7 @@ async function diagnoseMultiDomainIssue() {
   // Step 1: List ALL Lambda functions that match VCMail pattern
   console.log('1️⃣ Checking ALL VCMail Lambda Functions...\n');
   try {
-    const allFunctions = await lambda.listFunctions().promise();
+    const allFunctions = await lambda.send(new ListFunctionsCommand({ MaxItems: 1000 }));
     const vcmailFunctions = allFunctions.Functions.filter(f => 
       f.FunctionName.includes('-api') || 
       f.FunctionName.includes('vcmail') ||
@@ -49,26 +62,24 @@ async function diagnoseMultiDomainIssue() {
         
         // Get detailed configuration
         try {
-          const funcDetails = await lambda.getFunction({ FunctionName: func.FunctionName }).promise();
+          const funcDetails = await lambda.send(new GetFunctionCommand({ FunctionName: func.FunctionName }));
           const env = funcDetails.Configuration.Environment?.Variables || {};
           
+          // New architecture: shared Lambda "VCMail-api" loads config from SSM based on domain,
+          // so VCMAIL_CONFIG is optional and usually not present.
           if (env.VCMAIL_CONFIG) {
             try {
               const vcmailConfig = JSON.parse(env.VCMAIL_CONFIG);
-              console.log(`   Configured Domain: ${vcmailConfig.domain || 'NOT SET'}`);
-              console.log(`   S3 Bucket: ${vcmailConfig.s3BucketName || 'NOT SET'}`);
-              
-              // Check if this Lambda matches the configured domain
-              if (vcmailConfig.domain === config.domain) {
-                console.log(`   ✅ This Lambda is configured for ${config.domain}`);
-              } else {
-                console.log(`   ⚠️  This Lambda is configured for ${vcmailConfig.domain}, NOT ${config.domain}`);
-              }
+              console.log(`   Legacy VCMAIL_CONFIG found:`);
+              console.log(`      Domain: ${vcmailConfig.domain || 'NOT SET'}`);
+              console.log(`      S3 Bucket: ${vcmailConfig.s3BucketName || 'NOT SET'}`);
             } catch (parseError) {
-              console.log(`   ❌ Could not parse VCMAIL_CONFIG: ${parseError.message}`);
+              console.log(`   ⚠️  Could not parse VCMAIL_CONFIG: ${parseError.message}`);
             }
+          } else if (funcDetails.Configuration.FunctionName === 'VCMail-api') {
+            console.log('   ℹ️  Shared Lambda "VCMail-api" detected – domain-specific config is loaded from SSM at runtime (no VCMAIL_CONFIG env var needed).');
           } else {
-            console.log(`   ❌ VCMAIL_CONFIG not found in environment`);
+            console.log('   ℹ️  No VCMAIL_CONFIG environment variable set (expected for shared-SSM config).');
           }
         } catch (error) {
           console.log(`   ⚠️  Error getting function details: ${error.message}`);
@@ -87,9 +98,9 @@ async function diagnoseMultiDomainIssue() {
     // First check for active rule set
     let activeRuleSet = null;
     try {
-      activeRuleSet = await ses.describeActiveReceiptRuleSet().promise();
+      activeRuleSet = await ses.send(new DescribeActiveReceiptRuleSetCommand({}));
     } catch (error) {
-      if (error.code === 'RuleSetDoesNotExist') {
+      if (error.name === 'RuleSetDoesNotExist' || error.code === 'RuleSetDoesNotExist') {
         console.log(`   ❌ No active rule set found`);
         
         // Check if there are any rule sets that exist but aren't active
@@ -157,27 +168,16 @@ async function diagnoseMultiDomainIssue() {
               const functionName = functionNameMatch[1];
               console.log(`   Lambda Function Name: ${functionName}`);
               
-              // Check if this matches the expected function for this domain
-              const expectedFunctionName = `${config.projectName || config.domain.replace(/\./g, '-')}-api`;
+              // Check if this matches the expected shared function name
+              const expectedFunctionName = 'VCMail-api';  // Shared Lambda name for all projects
               if (functionName === expectedFunctionName) {
-                console.log(`   ✅ Lambda function name matches expected: ${expectedFunctionName}`);
+                console.log(`   ✅ Lambda function name matches expected shared Lambda: ${expectedFunctionName}`);
+                console.log(`   📝 This Lambda loads domain-specific config from SSM at runtime`);
               } else {
-                console.log(`   ⚠️  Lambda function name doesn't match expected: ${expectedFunctionName}`);
-                
-                // Check what domain that Lambda is configured for
-                try {
-                  const otherFunc = await lambda.getFunction({ FunctionName: functionName }).promise();
-                  const otherEnv = otherFunc.Configuration.Environment?.Variables || {};
-                  if (otherEnv.VCMAIL_CONFIG) {
-                    const otherConfig = JSON.parse(otherEnv.VCMAIL_CONFIG);
-                    console.log(`   ⚠️  That Lambda is configured for domain: ${otherConfig.domain || 'UNKNOWN'}`);
-                    if (otherConfig.domain !== config.domain) {
-                      console.log(`   ❌ MISMATCH: Rule for ${config.domain} points to Lambda for ${otherConfig.domain}`);
-                    }
-                  }
-                } catch (checkError) {
-                  console.log(`   ⚠️  Could not check Lambda configuration: ${checkError.message}`);
-                }
+                console.log(`   ⚠️  Lambda function name doesn't match expected shared Lambda: ${expectedFunctionName}`);
+                console.log(`   📝 Expected: ${expectedFunctionName} (shared Lambda)`);
+                console.log(`   📝 Actual: ${functionName}`);
+                console.log(`   💡 All projects should use the shared Lambda function "VCMail-api"`);
               }
             }
           } else {
@@ -208,14 +208,13 @@ async function diagnoseMultiDomainIssue() {
             const functionNameMatch = functionArn.match(/function:(.+?)(?::|$)/);
             if (functionNameMatch) {
               const functionName = functionNameMatch[1];
-              const expectedFunctionName = `${config.projectName || config.domain.replace(/\./g, '-')}-api`;
+              const expectedFunctionName = 'VCMail-api';
               
-              if (functionName !== expectedFunctionName) {
-                console.log(`\n   ⚠️  WARNING: Rule for ${config.domain} points to Lambda: ${functionName}`);
-                console.log(`   Expected Lambda: ${expectedFunctionName}`);
-                console.log(`   📝 This might be correct if using a shared Lambda, but verify the Lambda's domain configuration`);
+              if (functionName === expectedFunctionName) {
+                console.log(`\n   ✅ Rule for ${config.domain} correctly points to shared Lambda: ${expectedFunctionName}`);
               } else {
-                console.log(`\n   ✅ Rule for ${config.domain} is correctly configured`);
+                console.log(`\n   ⚠️  WARNING: Rule for ${config.domain} points to unexpected Lambda: ${functionName}`);
+                console.log(`   Expected shared Lambda: ${expectedFunctionName}`);
               }
             }
           }
@@ -229,7 +228,7 @@ async function diagnoseMultiDomainIssue() {
       console.log(`   📝 Run "npx vcmail" to create a rule set`);
     }
   } catch (error) {
-    if (error.code === 'RuleSetDoesNotExist') {
+    if (error.name === 'RuleSetDoesNotExist' || error.code === 'RuleSetDoesNotExist') {
       console.log(`   ❌ No active rule set found`);
       console.log(`   📝 Run "npx vcmail" to create a rule set`);
     } else {
@@ -237,42 +236,37 @@ async function diagnoseMultiDomainIssue() {
     }
   }
   
-  // Step 3: Check if expected Lambda exists
-  console.log('\n3️⃣ Checking Expected Lambda Function...\n');
-  const expectedFunctionName = `${config.projectName || config.domain.replace(/\./g, '-')}-api`;
-  console.log(`   Expected Lambda Function Name: ${expectedFunctionName}`);
+  // Step 3: Check shared Lambda "VCMail-api"
+  console.log('\n3️⃣ Checking Shared Lambda Function "VCMail-api"...\n');
+  const expectedFunctionName = 'VCMail-api';
+  console.log(`   Expected shared Lambda function name: ${expectedFunctionName}`);
   
   try {
-    const expectedFunc = await lambda.getFunction({ FunctionName: expectedFunctionName }).promise();
-    console.log(`   ✅ Expected Lambda function exists: ${expectedFunctionName}`);
+    const expectedFunc = await lambda.send(new GetFunctionCommand({ FunctionName: expectedFunctionName }));
+    console.log(`   ✅ Shared Lambda function exists: ${expectedFunctionName}`);
+    console.log('   📝 This Lambda is shared by all domains and loads config from SSM based on the incoming domain.');
     
     const env = expectedFunc.Configuration.Environment?.Variables || {};
     if (env.VCMAIL_CONFIG) {
-      const vcmailConfig = JSON.parse(env.VCMAIL_CONFIG);
-      if (vcmailConfig.domain === config.domain) {
-        console.log(`   ✅ Lambda is correctly configured for domain: ${config.domain}`);
-      } else {
-        console.log(`   ❌ Lambda is configured for domain: ${vcmailConfig.domain}, NOT ${config.domain}`);
-        console.log(`   📝 Update Lambda environment variable VCMAIL_CONFIG.domain to ${config.domain}`);
-      }
+      console.log('   ℹ️  Legacy VCMAIL_CONFIG env var is present but no longer required (config is loaded from SSM).');
     } else {
-      console.log(`   ❌ VCMAIL_CONFIG not found in Lambda environment`);
+      console.log('   ✅ No VCMAIL_CONFIG env var set – this is expected for the shared SSM-based configuration.');
     }
   } catch (error) {
-    if (error.code === 'ResourceNotFoundException') {
-      console.log(`   ❌ Expected Lambda function does NOT exist: ${expectedFunctionName}`);
-      console.log(`   📝 Run "npx vcmail" to create it`);
+    if (error.name === 'ResourceNotFoundException' || error.code === 'ResourceNotFoundException') {
+      console.log(`   ❌ Shared Lambda function does NOT exist: ${expectedFunctionName}`);
+      console.log('   📝 Run "npx vcmail" to deploy the shared Lambda function.');
     } else {
-      console.log(`   ⚠️  Error checking expected Lambda: ${error.message}`);
+      console.log(`   ⚠️  Error checking shared Lambda: ${error.message}`);
     }
   }
   
   // Step 4: Check Domain Verification
   console.log('\n4️⃣ Checking Domain Verification...\n');
   try {
-    const verificationAttrs = await ses.getIdentityVerificationAttributes({
+    const verificationAttrs = await ses.send(new GetIdentityVerificationAttributesCommand({
       Identities: [config.domain]
-    }).promise();
+    }));
     
     const verification = verificationAttrs.VerificationAttributes[config.domain];
     if (verification) {
@@ -291,17 +285,66 @@ async function diagnoseMultiDomainIssue() {
     console.log(`   ⚠️  Error checking domain verification: ${error.message}`);
   }
   
-  // Step 5: Check MX Records
-  console.log('\n5️⃣ Checking MX Records...\n');
+  // Step 5: Check recent Lambda logs for VCMail-api
+  console.log('\n5️⃣ Checking recent Lambda logs for "VCMail-api"...\n');
   try {
-    const route53 = new AWS.Route53();
-    const zones = await route53.listHostedZonesByName({ DNSName: config.domain }).promise();
+    const logGroupName = '/aws/lambda/VCMail-api';
+    
+    const streams = await cloudwatchlogs.send(new DescribeLogStreamsCommand({
+      logGroupName,
+      orderBy: 'LastEventTime',
+      descending: true,
+      limit: 1
+    }));
+    
+    if (!streams.logStreams || streams.logStreams.length === 0) {
+      console.log('   ⚠️  No log streams found for VCMail-api (Lambda may not have been invoked yet).');
+    } else {
+      const latestStream = streams.logStreams[0];
+      console.log(`   Latest log stream: ${latestStream.logStreamName}`);
+      console.log(`   Last event time: ${latestStream.lastEventTimestamp || 'N/A'}`);
+      
+      const eventsResponse = await cloudwatchlogs.send(new GetLogEventsCommand({
+        logGroupName,
+        logStreamName: latestStream.logStreamName,
+        limit: 50,
+        startFromHead: false
+      }));
+      
+      const events = eventsResponse.events || [];
+      if (events.length === 0) {
+        console.log('   ⚠️  No log events found in latest stream.');
+      } else {
+        const errorEvents = events.filter(e => 
+          e.message && (e.message.includes('ERROR') || e.message.includes('Exception') || e.message.includes('ConfigurationError'))
+        );
+        
+        if (errorEvents.length === 0) {
+          console.log('   ✅ No obvious ERROR/Exception/ConfigurationError messages in the latest Lambda logs.');
+        } else {
+          console.log('   ❌ Found potential error messages in the latest Lambda logs:');
+          const sampleErrors = errorEvents.slice(-5);
+          for (const evt of sampleErrors) {
+            console.log(`      ${new Date(evt.timestamp).toISOString()} - ${evt.message.trim()}`);
+          }
+        }
+      }
+    }
+  } catch (error) {
+    console.log(`   ⚠️  Error checking Lambda logs: ${error.message}`);
+  }
+  
+  // Step 6: Check MX Records
+  console.log('\n6️⃣ Checking MX Records...\n');
+  try {
+    const route53 = new Route53Client({});
+    const zones = await route53.send(new ListHostedZonesByNameCommand({ DNSName: config.domain }));
     const zone = zones.HostedZones.find(z => z.Name === `${config.domain}.`);
     
     if (zone) {
-      const records = await route53.listResourceRecordSets({
+      const records = await route53.send(new ListResourceRecordSetsCommand({
         HostedZoneId: zone.Id
-      }).promise();
+      }));
       
       const mxRecords = records.ResourceRecordSets.filter(r => 
         r.Type === 'MX' && (r.Name === `${config.domain}.` || r.Name === config.domain)
@@ -339,9 +382,8 @@ async function diagnoseMultiDomainIssue() {
   console.log('\n✅ Diagnostic complete!');
   console.log('\n💡 Common Issues and Fixes:');
   console.log('   1. Missing SES receipt rule: Run "npx vcmail" in the project directory');
-  console.log('   2. Rule points to wrong Lambda: Check Terraform state and re-run "npx vcmail"');
-  console.log('   3. Lambda configured for wrong domain: Update Lambda environment variable');
-  console.log('   4. Domain not verified: Run "npx vcmail" to verify domain');
+  console.log('   2. Rule points to wrong Lambda: Ensure it points to shared "VCMail-api"');
+  console.log('   3. Domain not verified: Run "npx vcmail" to verify domain');
 }
 
 if (require.main === module) {

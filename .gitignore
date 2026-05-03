@@ -51,6 +51,7 @@ lerna-debug.log*
 vcmail-lambda-package/
 lambda-package/
 .vcmail-terraform/
+.vcmail-terraform-account/
 
 # Terraform files
 # Local .terraform directories

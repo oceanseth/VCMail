@@ -7,7 +7,7 @@
  */
 
 const admin = require('firebase-admin');
-const AWS = require('aws-sdk');
+const { SSMClient, GetParameterCommand } = require('@aws-sdk/client-ssm');
 const path = require('path');
 const { getConfigWithDefaults, CONFIG_FILE } = require('../lib/config');
 const fs = require('fs-extra');
@@ -16,17 +16,17 @@ const fs = require('fs-extra');
  * Get Firebase service account from SSM Parameter Store
  */
 async function getFirebaseServiceAccountFromSSM(config) {
-    const ssm = new AWS.SSM({ region: config.awsRegion });
+    const ssm = new SSMClient({ region: config.awsRegion });
     const computedConfig = getConfigWithDefaults(config);
     const paramName = `${computedConfig.ssmPrefix}/firebase_service_account`;
     
     console.log(`📡 Loading Firebase service account from SSM: ${paramName}`);
     
     try {
-        const result = await ssm.getParameter({
+        const result = await ssm.send(new GetParameterCommand({
             Name: paramName,
             WithDecryption: true
-        }).promise();
+        }));
         
         if (!result?.Parameter?.Value) {
             throw new Error('Firebase service account not found in SSM');
@@ -62,7 +62,7 @@ async function getFirebaseServiceAccountFromSSM(config) {
         console.log(`✅ Successfully loaded Firebase service account from SSM`);
         return serviceAccount;
     } catch (error) {
-        if (error.code === 'ParameterNotFound') {
+        if (error.name === 'ParameterNotFound' || error.code === 'ParameterNotFound') {
             throw new Error(`Firebase service account not found in SSM at ${paramName}. Please upload it first.`);
         }
         throw error;
@@ -89,10 +89,6 @@ async function initializeFirebase() {
         console.error('❌ Error loading config:', error.message);
         process.exit(1);
     }
-
-    // Initialize AWS region
-    const awsRegion = config.awsRegion || process.env.AWS_REGION || 'us-east-1';
-    AWS.config.update({ region: awsRegion });
 
     // Load Firebase service account from SSM
     let serviceAccount;

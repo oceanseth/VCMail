@@ -35,15 +35,15 @@ output "api_gateway_endpoint" {
   value       = "https://${aws_api_gateway_rest_api.main.id}.execute-api.${var.aws_region}.amazonaws.com"
 }
 
-# Lambda outputs
+# Lambda (shared account stack) — exposed for debugging
 output "lambda_function_name" {
-  description = "Lambda function name for email processor"
-  value       = aws_lambda_function.email_processor.function_name
+  description = "Lambda function name for email processor (shared)"
+  value       = data.aws_lambda_function.email_processor.function_name
 }
 
 output "lambda_function_arn" {
-  description = "Lambda function ARN for email processor"
-  value       = aws_lambda_function.email_processor.arn
+  description = "Lambda function ARN for email processor (shared)"
+  value       = data.aws_lambda_function.email_processor.arn
 }
 
 output "api_gateway_url" {

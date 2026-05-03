@@ -2,6 +2,23 @@ import { initializeApp } from "https://www.gstatic.com/firebasejs/9.23.0/firebas
 import { getAuth, onAuthStateChanged, signInWithPopup, GoogleAuthProvider, signOut, createUserWithEmailAndPassword, signInWithEmailAndPassword, EmailAuthProvider } from "https://www.gstatic.com/firebasejs/9.23.0/firebase-auth.js";
 import { getDatabase, ref, get, set, push, query, orderByChild, limitToLast, startAfter, onValue, onChildAdded } from "https://www.gstatic.com/firebasejs/9.23.0/firebase-database.js";
 import { firebaseConfig, vcmailConfig } from "./firebaseConfig.js";
+import {
+  getGoogleOAuthClientId,
+  isGoogleCalendarConfigured,
+  hasCalendarAccessToken,
+  connectGoogleCalendar,
+  disconnectGoogleCalendar,
+  getValidAccessToken,
+  isIcsAttachment,
+  fetchIcsText,
+  checkIcsExistsOnCalendar,
+  importIcsToCalendar,
+  parseFirstVeventIcs,
+  formatIcsEventPreview,
+  listWritableCalendars,
+  getTargetCalendarId,
+  setTargetCalendarId,
+} from "./googleCalendar.js";
 
 // Get VCMail configuration from window object or use defaults
 const config = window.VCMAIL_CONFIG || vcmailConfig || {
@@ -9,6 +26,7 @@ const config = window.VCMAIL_CONFIG || vcmailConfig || {
   webmailDomain: "mail.example.com",
   apiEndpoint: "https://api.example.com",
   storageCacheKey: "vcmail_email_cache",
+  googleOAuthClientId: "",
   buildId: "unknown"
 };
 
@@ -501,6 +519,13 @@ function formatDateForMobile(timestamp) {
   }
 }
 
+function escapeHtml(text) {
+  if (text == null) return '';
+  const d = document.createElement('div');
+  d.textContent = String(text);
+  return d.innerHTML;
+}
+
 // Format file size for display
 function formatFileSize(bytes) {
   if (bytes === 0) return '0 Bytes';
@@ -549,6 +574,198 @@ const emailFrom = document.getElementById('email-from');
 const emailTo = document.getElementById('email-to');
 const emailDate = document.getElementById('email-date');
 const emailAttachmentsHeader = document.getElementById('email-attachments-header');
+if (emailAttachmentsHeader) {
+  emailAttachmentsHeader.addEventListener('click', async (e) => {
+    const openSettingsBtn = e.target.closest('.gcal-open-settings-btn');
+    if (openSettingsBtn) {
+      e.preventDefault();
+      showSettingsView();
+      return;
+    }
+    const btn = e.target.closest('.gcal-import-btn');
+    if (!btn) return;
+    e.preventDefault();
+    const index = parseInt(btn.getAttribute('data-gcal-att-index'), 10);
+    if (!viewingEmail || Number.isNaN(index)) return;
+    const attachmentsToShow = viewingEmail.attachments || viewingEmail.structure?.attachments || [];
+    const att = attachmentsToShow[index];
+    if (!att || !isIcsAttachment(att)) return;
+    const clientId = getGoogleOAuthClientId(config);
+    btn.disabled = true;
+    const prevText = btn.textContent;
+    btn.textContent = 'Adding…';
+    try {
+      const token = await getValidAccessToken(clientId);
+      if (!token) {
+        btn.disabled = false;
+        btn.textContent = prevText;
+        alert('Calendar session expired. Connect again in Settings.');
+        return;
+      }
+      const icsText = await fetchIcsText(att);
+      if (!icsText) {
+        btn.disabled = false;
+        btn.textContent = prevText;
+        alert('Could not read the calendar file.');
+        return;
+      }
+      await importIcsToCalendar(token, icsText);
+      const row = btn.closest('.attachment-item-gcal');
+      const status = row?.querySelector('.gcal-ics-status');
+      if (status) {
+        status.textContent = 'Exists on Calendar';
+        status.classList.add('gcal-exists');
+      }
+      btn.remove();
+    } catch (err) {
+      console.error(err);
+      alert(err.message || 'Could not add to calendar');
+      btn.disabled = false;
+      btn.textContent = prevText || 'Add to Google Calendar';
+    }
+  });
+}
+
+async function hydrateIcsAttachmentsUi(attachmentsToShow) {
+  if (!emailAttachmentsHeader) return;
+  const clientId = getGoogleOAuthClientId(config);
+  const gcalConfigured = isGoogleCalendarConfigured(config);
+
+  for (let index = 0; index < attachmentsToShow.length; index++) {
+    const att = attachmentsToShow[index];
+    if (!isIcsAttachment(att)) continue;
+
+    const previewRoot = emailAttachmentsHeader.querySelector(`[data-ics-preview-root="${index}"]`);
+    let icsText = null;
+    try {
+      icsText = await fetchIcsText(att);
+    } catch (err) {
+      console.warn('ICS fetch failed', err);
+      if (previewRoot) {
+        previewRoot.innerHTML = '<span class="ics-preview-error">Could not load invitation file</span>';
+      }
+      continue;
+    }
+    if (!icsText) {
+      if (previewRoot) {
+        previewRoot.innerHTML = '<span class="ics-preview-error">No invitation data</span>';
+      }
+      continue;
+    }
+
+    const parsed = parseFirstVeventIcs(icsText);
+    const preview = formatIcsEventPreview(parsed);
+    if (previewRoot) {
+      previewRoot.innerHTML = preview
+        ? `<span class="ics-event-preview">${escapeHtml(preview)}</span>`
+        : '<span class="ics-preview-muted">No event details parsed (download the file to view)</span>';
+    }
+
+    if (!gcalConfigured) continue;
+
+    const row = emailAttachmentsHeader.querySelector(`[data-gcal-ics-index="${index}"]`);
+    const statusEl = row?.querySelector('.gcal-ics-status');
+    if (!statusEl) continue;
+
+    const accessToken = await getValidAccessToken(clientId);
+    if (!accessToken) {
+      statusEl.innerHTML =
+        '<button type="button" class="btn btn-secondary gcal-open-settings-btn">Connect Google Calendar</button>';
+      continue;
+    }
+
+    try {
+      const { exists } = await checkIcsExistsOnCalendar(accessToken, icsText);
+      if (exists) {
+        statusEl.textContent = 'Already on your calendar';
+        statusEl.classList.add('gcal-exists');
+      } else {
+        statusEl.innerHTML = `<button type="button" class="btn btn-secondary gcal-import-btn" data-gcal-att-index="${index}">Add to Google Calendar</button>`;
+      }
+    } catch (e) {
+      console.warn('Calendar duplicate check failed', e);
+      statusEl.innerHTML = `<button type="button" class="btn btn-secondary gcal-import-btn" data-gcal-att-index="${index}">Add to Google Calendar</button>`;
+    }
+  }
+}
+
+async function refreshGcalTargetCalendarSelect() {
+  const wrap = document.getElementById('gcal-target-calendar-wrap');
+  const sel = document.getElementById('gcal-target-calendar-select');
+  if (!wrap || !sel) return;
+  if (!isGoogleCalendarConfigured(config) || !hasCalendarAccessToken()) {
+    wrap.classList.add('hidden');
+    return;
+  }
+  const clientId = getGoogleOAuthClientId(config);
+  const token = await getValidAccessToken(clientId);
+  if (!token) {
+    wrap.classList.add('hidden');
+    return;
+  }
+  wrap.classList.remove('hidden');
+  sel.disabled = true;
+  try {
+    const calendars = await listWritableCalendars(token);
+    const current = getTargetCalendarId();
+    sel.innerHTML = '';
+    let matched = false;
+    for (const c of calendars) {
+      const opt = document.createElement('option');
+      opt.value = c.id;
+      opt.textContent = (c.summary || c.id) + (c.primary ? ' (primary)' : '');
+      const selectMe = current === 'primary' ? !!c.primary : c.id === current;
+      if (selectMe) {
+        opt.selected = true;
+        matched = true;
+      }
+      sel.appendChild(opt);
+    }
+    if (!matched && current !== 'primary') {
+      const opt = document.createElement('option');
+      opt.value = current;
+      opt.textContent = `${current} (saved)`;
+      opt.selected = true;
+      sel.insertBefore(opt, sel.firstChild);
+    } else if (!matched && sel.options.length > 0) {
+      sel.options[0].selected = true;
+    }
+  } catch (err) {
+    console.warn('Could not load calendar list', err);
+    wrap.classList.add('hidden');
+  } finally {
+    sel.disabled = false;
+  }
+}
+
+function updateCalendarSettingsPanel() {
+  const disabled = document.getElementById('calendar-settings-disabled');
+  const active = document.getElementById('calendar-settings-active');
+  const statusEl = document.getElementById('calendar-connection-status');
+  const connectBtn = document.getElementById('calendar-connect-btn');
+  const disconnectBtn = document.getElementById('calendar-disconnect-btn');
+  const googleHint = document.getElementById('calendar-google-signin-hint');
+  if (!disabled || !active) return;
+  if (!isGoogleCalendarConfigured(config)) {
+    disabled.classList.remove('hidden');
+    active.classList.add('hidden');
+  } else {
+    disabled.classList.add('hidden');
+    active.classList.remove('hidden');
+    const connected = hasCalendarAccessToken();
+    if (statusEl) statusEl.textContent = connected ? 'Connected (this browser)' : 'Not connected';
+    if (connectBtn) connectBtn.classList.toggle('hidden', connected);
+    if (disconnectBtn) disconnectBtn.classList.toggle('hidden', !connected);
+    const isGoogleAuth = !!(
+      currentUser &&
+      Array.isArray(currentUser.providerData) &&
+      currentUser.providerData.some((p) => p.providerId === 'google.com')
+    );
+    if (googleHint) googleHint.classList.toggle('hidden', !isGoogleAuth);
+    void refreshGcalTargetCalendarSelect();
+  }
+}
+
 const emailContent = document.getElementById('email-content');
 const userEmailDisplay = document.getElementById('user-email-display');
 
@@ -801,6 +1018,29 @@ function extractAndDisplayEmailBody(email) {
   
   // For plain text content types, format as plain text and sanitize
   return formatPlainTextAsHtml(rawContent);
+}
+
+// Replace cid: (Content-ID) image references in HTML with attachment URLs so inline images display.
+// Prefer stable inline image URL (apiEndpoint + token) when present so the browser can cache by URL.
+function replaceCidReferencesInHtml(html, attachments, apiEndpoint) {
+  if (!html || typeof html !== 'string' || !attachments || !attachments.length) return html;
+  const cidToUrl = new Map();
+  const base = (apiEndpoint || '').replace(/\/$/, '');
+  for (const att of attachments) {
+    if (!att.contentId) continue;
+    const key = att.contentId.trim().toLowerCase();
+    // Prefer stable cacheable URL: /api/inlineImage?t=... (same URL per email = browser cache)
+    const url = (att.inlineImageToken && base)
+      ? `${base}/api/inlineImage?t=${encodeURIComponent(att.inlineImageToken)}`
+      : (att.url || (att.content && att.contentType ? `data:${att.contentType};base64,${att.content}` : null));
+    if (url && !cidToUrl.has(key)) cidToUrl.set(key, url);
+  }
+  if (cidToUrl.size === 0) return html;
+  return html.replace(/\bsrc\s*=\s*(["']?)cid:([^"'\s>]+)\1/gi, (match, quote, cidValue) => {
+    const key = cidValue.trim().toLowerCase();
+    const url = cidToUrl.get(key);
+    return url ? `src=${quote || '"'}${url}${quote || '"'}` : match;
+  });
 }
 
 // Helper function to format plain text with proper HTML spacing
@@ -1132,37 +1372,43 @@ async function showEmailView(email) {
       const filename = attachment.filename || `attachment-${index + 1}`;
       const size = attachment.size ? ` (${formatFileSize(attachment.size)})` : '';
       const escapedFilename = filename.replace(/"/g, '&quot;').replace(/'/g, '&#39;');
-      
+      const isIcs = isIcsAttachment(attachment);
+      const gcalConfigured = isGoogleCalendarConfigured(config);
+
+      let inner = '';
       if (attachment.url) {
-        // Use S3 presigned URL directly (preferred)
-        attachmentsHtml += `<div class="attachment-item"><a href="${attachment.url}" download="${escapedFilename}" class="attachment-link" target="_blank">📎 ${filename}${size}</a></div>`;
+        inner = `<a href="${attachment.url}" download="${escapedFilename}" class="attachment-link" target="_blank">📎 ${filename}${size}</a>`;
       } else if (attachment.content) {
-        // For attachments with embedded content, create a download link with data URL
         const mimeType = attachment.contentType || 'application/octet-stream';
-        
-        // Handle UTF-8 encoding properly for btoa
         let base64Content;
         try {
           if (attachment.encoding === 'base64') {
-            // Already base64 encoded
             base64Content = attachment.content;
           } else {
-            // Convert string to UTF-8 bytes, then to base64
             const utf8Bytes = new TextEncoder().encode(attachment.content);
             base64Content = btoa(String.fromCharCode(...utf8Bytes));
           }
-          
           const dataUrl = `data:${mimeType};base64,${base64Content}`;
-          attachmentsHtml += `<div class="attachment-item"><a href="${dataUrl}" download="${escapedFilename}" class="attachment-link">📎 ${filename}${size}</a></div>`;
+          inner = `<a href="${dataUrl}" download="${escapedFilename}" class="attachment-link">📎 ${filename}${size}</a>`;
         } catch (e) {
           console.warn('Failed to encode attachment as base64:', e);
-          // Fallback: show as text content instead of download link
-          attachmentsHtml += `<div class="attachment-item"><span class="attachment-text">📎 ${filename}${size} (text content available)</span></div>`;
+          inner = `<span class="attachment-text">📎 ${filename}${size} (text content available)</span>`;
         }
       } else {
-        // For binary attachments or missing content, show filename only
-        attachmentsHtml += `<div class="attachment-item"><span class="attachment-missing">📎 ${filename}${size} (content not available)</span></div>`;
+        inner = `<span class="attachment-missing">📎 ${filename}${size} (content not available)</span>`;
       }
+
+      let extra = '';
+      if (isIcs) {
+        extra += `<div class="ics-event-details" data-ics-preview-root="${index}"><span class="ics-preview-placeholder">Reading invitation…</span></div>`;
+        if (gcalConfigured) {
+          extra += `<div class="ics-gcal-row" data-gcal-ics-index="${index}"><span class="gcal-ics-status"></span></div>`;
+        }
+      }
+      const wrapClass = isIcs ? 'attachment-item attachment-item-ics' : 'attachment-item';
+      const mainWrapOpen = isIcs ? '<div class="attachment-ics-main">' : '';
+      const mainWrapClose = isIcs ? '</div>' : '';
+      attachmentsHtml += `<div class="${wrapClass}">${mainWrapOpen}${inner}${mainWrapClose}${extra}</div>`;
     });
     
     attachmentsHtml += '</div></div>';
@@ -1170,6 +1416,7 @@ async function showEmailView(email) {
     // Add to header section
     if (emailAttachmentsHeader) {
       emailAttachmentsHeader.innerHTML = attachmentsHtml;
+      void hydrateIcsAttachmentsUi(attachmentsToShow);
     }
   } else {
     // Clear attachments header if no attachments
@@ -1180,7 +1427,10 @@ async function showEmailView(email) {
   
   // Add the main email content
   contentHtml += '<div class="email-body">';
-  const bodyContent = extractAndDisplayEmailBody(fullEmail);
+  let bodyContent = extractAndDisplayEmailBody(fullEmail);
+  // Resolve cid: (Content-ID) references to inline images; use stable inline URL when available for caching
+  const attachmentsForCid = fullEmail.attachments || fullEmail.structure?.attachments || [];
+  bodyContent = replaceCidReferencesInHtml(bodyContent, attachmentsForCid, config.apiEndpoint);
   console.log(`📧 Email body content:`, {
     hasContent: !!bodyContent,
     contentLength: bodyContent?.length || 0,
@@ -1321,6 +1571,8 @@ function updateSettingsInfo() {
   if (accountUid) {
     accountUid.textContent = userUid || 'Not available';
   }
+
+  updateCalendarSettingsPanel();
 }
 
 // Event listeners for settings
@@ -1359,6 +1611,36 @@ if (clearCacheBtn) {
 if (refreshStorageBtn) {
   refreshStorageBtn.addEventListener('click', () => {
     updateSettingsInfo();
+  });
+}
+
+const calendarConnectBtn = document.getElementById('calendar-connect-btn');
+const calendarDisconnectBtn = document.getElementById('calendar-disconnect-btn');
+if (calendarConnectBtn) {
+  calendarConnectBtn.addEventListener('click', async () => {
+    const clientId = getGoogleOAuthClientId(config);
+    try {
+      calendarConnectBtn.disabled = true;
+      await connectGoogleCalendar(clientId);
+      updateCalendarSettingsPanel();
+    } catch (err) {
+      alert(err.message || 'Could not connect Google Calendar');
+    } finally {
+      calendarConnectBtn.disabled = false;
+    }
+  });
+}
+if (calendarDisconnectBtn) {
+  calendarDisconnectBtn.addEventListener('click', () => {
+    disconnectGoogleCalendar();
+    updateCalendarSettingsPanel();
+  });
+}
+
+const gcalTargetSelect = document.getElementById('gcal-target-calendar-select');
+if (gcalTargetSelect) {
+  gcalTargetSelect.addEventListener('change', () => {
+    setTargetCalendarId(gcalTargetSelect.value);
   });
 }
 
@@ -1446,6 +1728,39 @@ async function setupUsername() {
   }
 }
 
+// Normalize an email address by converting Unicode variants (bold, full-width, accented, etc.)
+// into plain ASCII characters and stripping any remaining non-ASCII symbols.
+function normalizeEmailAddress(input) {
+  if (!input || typeof input !== 'string') return input;
+
+  let value = input;
+
+  // Use Unicode normalization (NFKD) when available to fold compatibility characters
+  // like full-width or mathematical bold letters back to their ASCII equivalents.
+  try {
+    if (typeof value.normalize === 'function') {
+      value = value.normalize('NFKD');
+    }
+  } catch (e) {
+    // If normalization is not supported, continue with the original string.
+  }
+
+  // Strip combining diacritical marks (accents, etc.)
+  value = value.replace(/[\u0300-\u036f]/g, '');
+
+  // Map a few common Unicode punctuation variants to ASCII.
+  value = value
+    .replace(/[\uFF20]/g, '@') // full-width @
+    .replace(/[\uFF0E\u2024\uFE52\uFF61]/g, '.') // full-width / dotted variants
+    .replace(/[\u2018\u2019\u201B\u2032]/g, "'") // curly/single quotes
+    .replace(/[\u201C\u201D\u201F\u2033]/g, '"'); // curly/double quotes
+
+  // Finally, drop any remaining non-ASCII characters.
+  value = value.replace(/[^\x00-\x7F]/g, '');
+
+  return value.trim();
+}
+
 async function sendEmail() {
   const to = toInput.value.trim();
   const subject = subjectInput.value.trim();
@@ -1457,6 +1772,9 @@ async function sendEmail() {
   if (emailMatch) {
     emailAddress = emailMatch[1];
   }
+
+  // Normalize email address to plain ASCII to avoid Unicode variants (bold, full-width, etc.)
+  emailAddress = normalizeEmailAddress(emailAddress);
   
   // Basic email validation
   if (!emailAddress.match(/^[^\s@]+@[^\s@]+\.[^\s@]+$/)) {
@@ -1480,7 +1798,8 @@ async function sendEmail() {
       body: JSON.stringify({
         to: emailAddress,
         subject: subject,
-        body: body
+        body: body,
+        domain: config.domain || window.location.hostname.replace(/^mail\./, '') // Extract domain from hostname
       })
     });
     
@@ -1508,7 +1827,7 @@ async function sendEmail() {
       content: body,
       timestamp: Date.now(),
       from: `${username}@${config.domain || 'example.com'}`,
-      messageId: result.MessageId || `local_${Date.now()}`,
+      messageId: result.messageId || result.MessageId || `local_${Date.now()}`,
       isReply: !!replyingTo,
       replyTo: replyingTo ? replyingTo.id : null
     };
@@ -1555,15 +1874,16 @@ async function sendEmail() {
     
     // Clear form and handle navigation
     composing = false;
+    const wasReply = !!replyingTo;
     replyingTo = null;
     
-    // If we were replying, stay in sent folder to show the sent email
-    if (currentFolder === 'sent') {
+    // If we were replying from sent folder, stay in sent folder to show the sent email
+    if (wasReply && currentFolder === 'sent') {
       // Refresh sent emails to show the new one
       await loadSentEmails();
       renderInboxList();
     } else {
-      // Return to inbox if composing new email
+      // Return to inbox for new emails or replies from inbox
       showInboxView();
     }
     

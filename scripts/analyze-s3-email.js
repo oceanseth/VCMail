@@ -5,7 +5,7 @@
  * Usage: node scripts/analyze-s3-email.js <messageId> [bucketName]
  */
 
-const AWS = require('aws-sdk');
+const { S3Client, GetObjectCommand } = require('@aws-sdk/client-s3');
 const path = require('path');
 
 // Load email parsing functions from the API
@@ -18,9 +18,8 @@ const {
 } = require('../api/api');
 
 // Initialize S3
-const s3 = new AWS.S3({
-    region: process.env.AWS_REGION || 'us-east-1',
-    signatureVersion: 'v4'
+const s3 = new S3Client({
+    region: process.env.AWS_REGION || 'us-east-1'
 });
 
 async function analyzeEmail(messageId, bucketName = 'voicecert-com-mail-inbox') {
@@ -32,12 +31,12 @@ async function analyzeEmail(messageId, bucketName = 'voicecert-com-mail-inbox') 
     try {
         // Download the email from S3
         console.log('⬇️  Downloading email from S3...');
-        const result = await s3.getObject({
+        const result = await s3.send(new GetObjectCommand({
             Bucket: bucketName,
             Key: messageId
-        }).promise();
+        }));
         
-        const rawEmail = result.Body.toString('utf-8');
+        const rawEmail = await result.Body.transformToString('utf-8');
         const fileSize = rawEmail.length;
         console.log(`✅ Downloaded email (${fileSize} bytes / ${(fileSize / 1024).toFixed(2)} KB)`);
         console.log('');

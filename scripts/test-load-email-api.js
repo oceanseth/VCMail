@@ -5,7 +5,7 @@
  */
 
 const path = require('path');
-const AWS = require('aws-sdk');
+const { S3Client, GetObjectCommand } = require('@aws-sdk/client-s3');
 
 // Load configuration
 const { loadConfig } = require('../lib/config');
@@ -37,9 +37,8 @@ async function testLoadEmail() {
 
         // Initialize S3
         console.log('🔧 Initializing S3...');
-        const s3 = new AWS.S3({
-            region: config.awsRegion || 'us-east-1',
-            signatureVersion: 'v4'
+        const s3 = new S3Client({
+            region: config.awsRegion || 'us-east-1'
         });
         const bucketName = config.s3BucketName;
 
@@ -142,12 +141,12 @@ async function testLoadEmail() {
             console.log(`\n📥 Loading raw email from S3 using messageId: ${emailData.messageId}`);
             try {
                 const rawEmailKey = emailData.messageId;
-                const rawEmailObject = await s3.getObject({
+                const rawEmailObject = await s3.send(new GetObjectCommand({
                     Bucket: bucketName,
                     Key: rawEmailKey
-                }).promise();
+                }));
                 
-                const rawEmailContent = rawEmailObject.Body.toString('utf-8');
+                const rawEmailContent = await rawEmailObject.Body.transformToString('utf-8');
                 console.log(`✅ Loaded raw email from S3 (${rawEmailContent.length} bytes)`);
                 
                 // Now we need to parse it - let's require the parsing functions

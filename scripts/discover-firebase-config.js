@@ -3,7 +3,7 @@
  * Automatically retrieves Firebase config values using the service account
  */
 
-const AWS = require('aws-sdk');
+const { SSMClient, GetParameterCommand } = require('@aws-sdk/client-ssm');
 const https = require('https');
 const { getConfigWithDefaults, CONFIG_FILE } = require('../lib/config');
 const path = require('path');
@@ -21,15 +21,15 @@ try {
  * Get Firebase service account from SSM
  */
 async function getFirebaseServiceAccount(config) {
-  const ssm = new AWS.SSM({ region: config.awsRegion });
+  const ssm = new SSMClient({ region: config.awsRegion });
   const computedConfig = getConfigWithDefaults(config);
   const paramName = `${computedConfig.ssmPrefix}/firebase_service_account`;
   
   try {
-    const result = await ssm.getParameter({
+    const result = await ssm.send(new GetParameterCommand({
       Name: paramName,
       WithDecryption: true
-    }).promise();
+    }));
     
     if (!result?.Parameter?.Value) {
       throw new Error('Firebase service account not found in SSM');
@@ -62,7 +62,7 @@ async function getFirebaseServiceAccount(config) {
     
     return serviceAccount;
   } catch (error) {
-    if (error.code === 'ParameterNotFound') {
+    if (error.name === 'ParameterNotFound' || error.code === 'ParameterNotFound') {
       throw new Error(`Firebase service account not found in SSM at ${paramName}`);
     }
     throw error;

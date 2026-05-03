@@ -1,38 +1,216 @@
-const AWS = require('aws-sdk');
+const { S3Client, GetObjectCommand, PutObjectCommand, HeadObjectCommand } = require('@aws-sdk/client-s3');
+const { getSignedUrl } = require('@aws-sdk/s3-request-presigner');
+const { SSMClient, GetParameterCommand } = require('@aws-sdk/client-ssm');
+const { SESClient, SendEmailCommand } = require('@aws-sdk/client-ses');
+const crypto = require('crypto');
 const path = require('path');
 
-// Load base configuration from environment variables or config file
+// Inline image token: signed token for cid: image URLs so img src can use a stable, cacheable URL
+const INLINE_IMAGE_TOKEN_EXPIRY_SEC = 24 * 60 * 60; // 24 hours - same URL for a day = good browser cache
+const INLINE_IMAGE_CACHE_MAX_AGE = 60 * 60; // 1 hour - Cache-Control for the image response
+
+function getInlineImageSecret(config) {
+    return process.env.INLINE_IMAGE_SECRET || (config && config.firebaseConfig && config.firebaseConfig.projectId) || 'vcmail-inline-image-default';
+}
+
+function createInlineImageToken(uid, emailId, contentId, folder, config) {
+    const exp = Math.floor(Date.now() / 1000) + INLINE_IMAGE_TOKEN_EXPIRY_SEC;
+    const payload = { uid, emailId, contentId: String(contentId), folder, exp };
+    const payloadStr = JSON.stringify(payload);
+    const payloadB64 = Buffer.from(payloadStr, 'utf-8').toString('base64url');
+    const secret = getInlineImageSecret(config);
+    const sig = crypto.createHmac('sha256', secret).update(payloadStr).digest('base64url');
+    return `${payloadB64}.${sig}`;
+}
+
+function verifyInlineImageToken(token, config) {
+    if (!token || typeof token !== 'string') return null;
+    const parts = token.split('.');
+    if (parts.length !== 2) return null;
+    try {
+        const payloadStr = Buffer.from(parts[0], 'base64url').toString('utf-8');
+        const payload = JSON.parse(payloadStr);
+        const secret = getInlineImageSecret(config);
+        const expectedSig = crypto.createHmac('sha256', secret).update(payloadStr).digest('base64url');
+        if (expectedSig !== parts[1]) return null;
+        if (payload.exp && payload.exp < Math.floor(Date.now() / 1000)) return null;
+        return payload;
+    } catch (e) {
+        return null;
+    }
+}
+
+// Load base configuration - in Lambda, we don't use config files
+// Domain-specific config is loaded from SSM at runtime
 let baseConfig = {};
 try {
-    // Try to load from environment variables first (for Lambda)
-    if (process.env.VCMAIL_CONFIG) {
-        baseConfig = JSON.parse(process.env.VCMAIL_CONFIG);
-    } else {
-        // Fallback to config file (for local development)
-        const { loadConfig } = require('../lib/config');
-        baseConfig = loadConfig(process.cwd());
-    }
-} catch (error) {
-    console.warn('Could not load VCMail config, using defaults:', error.message);
-    // Use sensible defaults if config not available
+    // In Lambda, AWS_REGION is automatically provided by the runtime
+    // We don't need to load from config file - domain-specific config comes from SSM
     baseConfig = {
-        domain: process.env.DOMAIN || 'example.com',
-        s3BucketName: process.env.S3_BUCKET_NAME || 'vcmail-mail-inbox',
-        ssmPrefix: process.env.SSM_PREFIX || '/vcmail/prod',
+        awsRegion: process.env.AWS_REGION || 'us-east-1'
+    };
+} catch (error) {
+    console.warn('Could not load base config, using defaults:', error.message);
+    baseConfig = {
         awsRegion: process.env.AWS_REGION || 'us-east-1'
     };
 }
 
 // Domain-specific config cache (keyed by domain)
+// Each cached config includes: domain config, Firebase app, and AWS service clients
 const domainConfigCache = new Map();
 
-// SSM client for loading domain-specific config
-const ssm = new AWS.SSM({
+// SSM client for loading domain-specific config (reused across all domains)
+const ssm = new SSMClient({
     region: baseConfig.awsRegion || process.env.AWS_REGION || 'us-east-1'
 });
 
-// Helper functions from lib/config
-const { sanitizeDomainForAWS, deriveSSMPrefix, deriveS3BucketName, deriveProjectName } = require('../lib/config');
+function isParameterNotFound(err) {
+    return err && (err.name === 'ParameterNotFound' || err.code === 'ParameterNotFound');
+}
+
+function isS3NotFound(err) {
+    return err && (
+        err.name === 'NotFound' ||
+        err.name === 'NoSuchKey' ||
+        err.code === 'NotFound' ||
+        err.code === 'NoSuchKey' ||
+        err.$metadata?.httpStatusCode === 404
+    );
+}
+
+function exposeErrorDetailsToClient() {
+    return (
+        process.env.VCMAIL_EXPOSE_ERROR_DETAILS === '1' ||
+        process.env.NODE_ENV === 'development'
+    );
+}
+
+/**
+ * JSON body for API Gateway proxy errors. Clients often surface `message` only; we mirror the real
+ * text there and in `error`, plus `errorCode` and `requestId` (Lambda) for CloudWatch correlation.
+ */
+function buildApiErrorJsonBody(err, context) {
+    const msg = err && err.message ? String(err.message) : String(err || 'Unexpected error');
+    const code = err && (err.code || err.name) ? String(err.code || err.name) : 'Error';
+    const body = {
+        error: msg,
+        message: msg,
+        errorCode: code
+    };
+    if (context && context.awsRequestId) {
+        body.requestId = context.awsRequestId;
+    }
+    if (exposeErrorDetailsToClient() && err && err.stack) {
+        body.details = String(err.stack).slice(0, 4000);
+    }
+    return JSON.stringify(body);
+}
+
+function json500Headers(baseHeaders) {
+    return {
+        ...baseHeaders,
+        'Content-Type': 'application/json'
+    };
+}
+
+async function s3BodyToBuffer(body) {
+    if (!body) return Buffer.alloc(0);
+    if (typeof body.transformToByteArray === 'function') {
+        return Buffer.from(await body.transformToByteArray());
+    }
+    const chunks = [];
+    for await (const chunk of body) {
+        chunks.push(chunk);
+    }
+    return Buffer.concat(chunks);
+}
+
+async function s3BodyToUtf8(body) {
+    if (!body) return '';
+    if (typeof body.transformToString === 'function') {
+        return body.transformToString('utf-8');
+    }
+    return (await s3BodyToBuffer(body)).toString('utf-8');
+}
+
+/** Browser fetch() to S3 presigned URLs usually fails CORS; inline small .ics bodies in loadEmail JSON instead. */
+const ICS_ATTACHMENT_INLINE_MAX_BYTES = 512 * 1024;
+
+function isIcsLikeAttachmentMeta({ filename, contentType }) {
+    const fn = (filename || '').toLowerCase();
+    const ct = (contentType || '').toLowerCase();
+    return fn.endsWith('.ics') || ct.includes('text/calendar') || ct === 'application/ics';
+}
+
+async function tryAddInlineIcsBodyToAttachmentEntry(attEntry, s3Key, sizeHint, s3Client, bucketName, logPrefix = '') {
+    if (!s3Key || !attEntry || !isIcsLikeAttachmentMeta(attEntry)) return;
+    const hint = Number(sizeHint) || 0;
+    if (hint > ICS_ATTACHMENT_INLINE_MAX_BYTES) {
+        console.log(`[EMAIL] ICS skip inline (declared size): ${logPrefix}${attEntry.filename}`);
+        return;
+    }
+    if (!hint || hint <= 0) {
+        try {
+            const head = await s3Client.send(new HeadObjectCommand({ Bucket: bucketName, Key: s3Key }));
+            const cl = head.ContentLength || 0;
+            if (cl > ICS_ATTACHMENT_INLINE_MAX_BYTES) {
+                console.log(`[EMAIL] ICS skip inline (S3 size ${cl}): ${logPrefix}${attEntry.filename}`);
+                return;
+            }
+        } catch (e) {
+            console.warn(`[EMAIL] ICS HeadObject failed, skip inline (${s3Key}):`, e.message);
+            return;
+        }
+    }
+    try {
+        const result = await s3Client.send(new GetObjectCommand({ Bucket: bucketName, Key: s3Key }));
+        const bodyBuf = await s3BodyToBuffer(result.Body);
+        if (bodyBuf.length > ICS_ATTACHMENT_INLINE_MAX_BYTES) {
+            console.warn(`[EMAIL] ICS skip inline (read ${bodyBuf.length}b): ${attEntry.filename}`);
+            return;
+        }
+        attEntry.content = bodyBuf.toString('base64');
+        attEntry.encoding = 'base64';
+        console.log(`[OK] Inlined ICS (${bodyBuf.length}b) ${logPrefix}${attEntry.filename}`);
+    } catch (e) {
+        console.warn(`[EMAIL] Inline ICS GetObject failed (${attEntry.filename}):`, e.message);
+    }
+}
+
+async function presignGetObject(s3Client, { bucket, key, expiresIn, responseContentDisposition }) {
+    const input = { Bucket: bucket, Key: key };
+    if (responseContentDisposition) {
+        input.ResponseContentDisposition = responseContentDisposition;
+    }
+    return getSignedUrl(s3Client, new GetObjectCommand(input), { expiresIn });
+}
+
+async function presignPutObject(s3Client, { bucket, key, contentType, expiresIn }) {
+    return getSignedUrl(
+        s3Client,
+        new PutObjectCommand({ Bucket: bucket, Key: key, ContentType: contentType }),
+        { expiresIn }
+    );
+}
+
+// Helper functions (inlined to avoid requiring lib/config.js which needs fs-extra)
+function sanitizeDomainForAWS(domain) {
+    if (!domain) return 'example-com';
+    return domain.replace(/\./g, '-').toLowerCase();
+}
+
+function deriveSSMPrefix(domain) {
+    return `/${sanitizeDomainForAWS(domain || 'example.com')}/prod`;
+}
+
+function deriveS3BucketName(domain) {
+    return `${sanitizeDomainForAWS(domain || 'example.com')}-mail-inbox`;
+}
+
+function deriveProjectName(domain) {
+    return `${sanitizeDomainForAWS(domain || 'example.com')}-mail`;
+}
 
 /**
  * Extract domain from Host header (for API Gateway/CloudFront requests)
@@ -92,17 +270,17 @@ async function loadDomainConfig(domain) {
     try {
         const firebaseParamName = `${ssmPrefix}/firebase_config`;
         console.log(`[CONFIG] Loading Firebase config from SSM: ${firebaseParamName}`);
-        const firebaseResult = await ssm.getParameter({
+        const firebaseResult = await ssm.send(new GetParameterCommand({
             Name: firebaseParamName,
             WithDecryption: true
-        }).promise();
+        }));
         
         if (firebaseResult.Parameter?.Value) {
             firebaseConfig = JSON.parse(firebaseResult.Parameter.Value);
             console.log(`[CONFIG] Loaded Firebase config from firebase_config parameter`);
         }
     } catch (error) {
-        if (error.code === 'ParameterNotFound') {
+        if (isParameterNotFound(error)) {
             console.log(`[CONFIG] firebase_config parameter not found, trying firebase_service_account`);
         } else {
             console.warn(`[CONFIG] Could not load Firebase config from SSM: ${error.message}`);
@@ -112,10 +290,10 @@ async function loadDomainConfig(domain) {
         try {
             const altParamName = `${ssmPrefix}/firebase_service_account`;
             console.log(`[CONFIG] Loading Firebase service account from SSM: ${altParamName}`);
-            const altResult = await ssm.getParameter({
+            const altResult = await ssm.send(new GetParameterCommand({
                 Name: altParamName,
                 WithDecryption: true
-            }).promise();
+            }));
             
             if (altResult.Parameter?.Value) {
                 let paramValue = altResult.Parameter.Value.trim();
@@ -146,11 +324,16 @@ async function loadDomainConfig(domain) {
                 }
                 
                 // Construct Firebase config from service account
+                // NOTE: This is a fallback - the setup script should store the complete Firebase config
+                // in SSM as {ssmPrefix}/firebase_config after discovering the correct database URL.
+                // If this constructed URL is wrong (e.g., legacy format or custom database name),
+                // manually store firebase_config in SSM with the correct databaseURL.
+                const projectId = serviceAccount.project_id;
                 firebaseConfig = {
-                    projectId: serviceAccount.project_id,
-                    databaseURL: `https://${serviceAccount.project_id}-default-rtdb.firebaseio.com`
+                    projectId: projectId,
+                    databaseURL: `https://${projectId}-default-rtdb.firebaseio.com`
                 };
-                console.log(`[CONFIG] Constructed Firebase config from service account`);
+                console.log(`[CONFIG] Constructed Firebase config from service account (fallback - prefer storing firebase_config in SSM)`);
             }
         } catch (altError) {
             console.warn(`[CONFIG] Could not load Firebase config from alternative SSM parameter: ${altError.message}`);
@@ -169,18 +352,40 @@ async function loadDomainConfig(domain) {
         firebaseConfig: firebaseConfig
     };
     
-    // Cache the config
+    // Initialize Firebase app and add to config (if Firebase config is available)
+    if (firebaseConfig && firebaseConfig.databaseURL) {
+        try {
+            console.log(`[CONFIG] Initializing Firebase app for domain: ${domain}`);
+            domainConfig.firebaseApp = await firebaseInitializer.get(firebaseConfig.databaseURL, ssmPrefix);
+            console.log(`[CONFIG] Firebase app initialized and cached for domain: ${domain}`);
+        } catch (error) {
+            console.error(`[CONFIG] Failed to initialize Firebase app for domain ${domain}:`, error);
+            // Don't throw - let caller handle missing Firebase app
+            domainConfig.firebaseApp = null;
+        }
+    } else {
+        domainConfig.firebaseApp = null;
+    }
+    
+    // Initialize and cache AWS service clients per domain
+    // S3 client (region-specific)
+    domainConfig.s3Client = new S3Client({ region: awsRegion });
+    
+    // SES client (region-specific, for sending emails)
+    domainConfig.sesClient = new SESClient({ region: awsRegion });
+    
+    console.log(`[CONFIG] AWS service clients initialized for domain: ${domain}`);
+    
+    // Cache the complete config (includes Firebase app and AWS clients)
     domainConfigCache.set(domain, domainConfig);
-    console.log(`[CONFIG] Configuration loaded and cached for domain: ${domain}`);
+    console.log(`[CONFIG] Complete configuration loaded and cached for domain: ${domain}`);
     
     return domainConfig;
 }
 
 // Initialize S3 client with base region (will be updated per request if needed)
-const s3 = new AWS.S3({
-    region: baseConfig.awsRegion || process.env.AWS_REGION || 'us-east-1',
-    signatureVersion: 'v4',
-    endpoint: `https://s3.${baseConfig.awsRegion || process.env.AWS_REGION || 'us-east-1'}.amazonaws.com`
+const s3 = new S3Client({
+    region: baseConfig.awsRegion || process.env.AWS_REGION || 'us-east-1'
 });
 
 // Parse Firebase config - don't throw at module load time, handle in handler
@@ -248,8 +453,7 @@ function safeLog(prefix, ...args) {
 }
 
 
-// Firebase app cache (keyed by database URL)
-const firebaseAppCache = new Map();
+// Firebase initializer (Firebase apps are now cached within domain config objects)
 
 exports.handler = async (event, context) => {
     // Define headers outside try-catch so they're always available
@@ -344,34 +548,24 @@ exports.handler = async (event, context) => {
                 };
             }
             
-            // Update module-level config for this invocation
-            const oldConfigSes = config;
-            config = domainConfig || config;
-            
-            // Get or initialize Firebase app for this database URL
-            const cacheKeySes = `${firebaseConfig.databaseURL}:${config.ssmPrefix}`;
-            if (!firebaseAppCache.has(cacheKeySes)) {
-                try {
-                    console.log(`[FIREBASE] Initializing Firebase for database: ${firebaseConfig.databaseURL} with SSM prefix: ${config.ssmPrefix}`);
-                    firebaseApp = await firebaseInitializer.get(firebaseConfig.databaseURL, config.ssmPrefix);
-                    firebaseAppCache.set(cacheKeySes, firebaseApp);
-                    console.log('[FIREBASE] Firebase initialized successfully');
-                } catch (error) {
-                    console.error('[ERROR] Failed to initialize Firebase:', error);
-                    return {
-                        statusCode: 500,
-                        headers,
-                        body: JSON.stringify({ 
-                            error: `Failed to initialize Firebase: ${error.message}`,
-                            errorCode: error.code || error.name
-                        })
-                    };
-                }
-            } else {
-                firebaseApp = firebaseAppCache.get(cacheKeySes);
+            // Config is now loaded with Firebase app and AWS clients cached
+            // Check if Firebase app is available
+            if (!config.firebaseApp) {
+                console.error('[ERROR] Firebase app not available for domain:', detectedDomain);
+                return {
+                    statusCode: 500,
+                    headers: {
+                        'Access-Control-Allow-Origin': '*',
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({ 
+                        error: `Firebase app not initialized for domain ${detectedDomain}`,
+                        errorCode: 'ConfigurationError'
+                    })
+                };
             }
             
-            // Pass config to handleSesEvent
+            // Pass config (which includes firebaseApp) to handleSesEvent
             return await handleSesEvent(event, config);
         }
 
@@ -390,36 +584,103 @@ exports.handler = async (event, context) => {
             };
         }
         
-        // Extract domain from Host header (for API Gateway/CloudFront requests)
-        const host = event.headers?.Host || 
-                     event.headers?.host ||
-                     event.headers?.['Host'] ||
-                     event.headers?.['host'] ||
-                     event.requestContext?.domainName ||
-                     event.requestContext?.domain;
+        // Extract domain from Host header for API Gateway requests
+        // CloudFront forwards requests, so we need to check multiple header sources
+        const hostHeader = event.headers?.Host || 
+                          event.headers?.host || 
+                          event.headers?.['Host'] ||
+                          event.headers?.['host'] ||
+                          event.requestContext?.domainName ||
+                          null;
+        
+        console.log('[API] Host header:', hostHeader);
+        console.log('[API] All headers:', JSON.stringify(event.headers || {}, null, 2));
+        
+        // Helper to extract header value (handles both string and array formats)
+        const getHeaderValue = (headerName) => {
+            const value = event.headers?.[headerName] || 
+                         event.headers?.[headerName.toLowerCase()] ||
+                         null;
+            // Handle array format (CloudFront sometimes sends headers as arrays)
+            if (Array.isArray(value)) {
+                return value[0] || null;
+            }
+            return value;
+        };
         
         let detectedDomain = null;
-        if (host) {
-            detectedDomain = extractDomainFromHost(host);
-            console.log(`[API] Detected domain from Host header: ${host} -> ${detectedDomain}`);
+        let domainSource = null;
+        
+        // First, check if Host header is API Gateway domain - if so, ignore it and check custom headers
+        if (hostHeader && hostHeader.includes('execute-api')) {
+            console.log('[API] Host header is API Gateway domain, checking custom headers...');
+            
+            // Try CloudFront custom header (configured in Terraform to forward mail_domain)
+            const originalHost = getHeaderValue('X-Original-Host');
+            console.log('[API] X-Original-Host header:', originalHost);
+            if (originalHost) {
+                detectedDomain = extractDomainFromHost(originalHost);
+                domainSource = 'X-Original-Host';
+                console.log('[API] Extracted domain from X-Original-Host header:', detectedDomain);
+            }
+            
+            // Try X-Forwarded-Host header
+            if (!detectedDomain) {
+                const forwardedHost = getHeaderValue('X-Forwarded-Host');
+                console.log('[API] X-Forwarded-Host header:', forwardedHost);
+                if (forwardedHost) {
+                    detectedDomain = extractDomainFromHost(forwardedHost);
+                    domainSource = 'X-Forwarded-Host';
+                    console.log('[API] Extracted domain from X-Forwarded-Host:', detectedDomain);
+                }
+            }
+            
+            // Try other custom headers (if configured via Lambda@Edge)
+            if (!detectedDomain) {
+                const customDomain = getHeaderValue('X-Custom-Domain');
+                if (customDomain) {
+                    detectedDomain = extractDomainFromHost(customDomain);
+                    domainSource = 'X-Custom-Domain';
+                    console.log('[API] Extracted domain from X-Custom-Domain header:', detectedDomain);
+                }
+            }
+        } else if (hostHeader) {
+            // Host header is not API Gateway domain, try to extract from it
+            detectedDomain = extractDomainFromHost(hostHeader);
+            domainSource = 'Host';
+            console.log('[API] Extracted domain from Host header:', detectedDomain);
         }
         
+        // If still no domain, try requestContext as last resort
         if (!detectedDomain) {
-            console.warn('[WARN] Could not detect domain from request headers, using fallback');
-            // Fallback: try to use base config if available
-            if (baseConfig.domain && baseConfig.domain !== 'example.com') {
-                detectedDomain = baseConfig.domain;
-                console.log(`[API] Using fallback domain from base config: ${detectedDomain}`);
-            } else {
-                return {
-                    statusCode: 400,
-                    headers,
-                    body: JSON.stringify({ 
-                        error: 'Could not determine domain from request. Host header is required.',
-                        errorCode: 'ConfigurationError'
-                    })
-                };
+            const apiDomain = event.requestContext?.domainName;
+            if (apiDomain && !apiDomain.includes('execute-api')) {
+                detectedDomain = extractDomainFromHost(apiDomain);
+                domainSource = 'requestContext.domainName';
+                console.log('[API] Extracted domain from requestContext.domainName:', detectedDomain);
             }
+        }
+        
+        console.log(`[API] Final detected domain: ${detectedDomain} (source: ${domainSource})`);
+        
+        if (!detectedDomain) {
+            console.error('[ERROR] Could not detect domain from request headers');
+            console.error('[ERROR] Host header:', hostHeader);
+            console.error('[ERROR] Available headers:', Object.keys(event.headers || {}));
+            console.error('[ERROR] Header values:', JSON.stringify(event.headers || {}, null, 2));
+            return {
+                statusCode: 500,
+                headers,
+                body: JSON.stringify({ 
+                    error: `Could not detect domain from request. Host header was: ${hostHeader}. Please configure CloudFront to forward the original Host header or include domain in request body.`,
+                    errorCode: 'ConfigurationError',
+                    debug: {
+                        hostHeader: hostHeader,
+                        availableHeaders: Object.keys(event.headers || {}),
+                        headerValues: event.headers
+                    }
+                })
+            };
         }
         
         // Load domain-specific config
@@ -494,38 +755,24 @@ exports.handler = async (event, context) => {
                 };
             }
             
-            // Update module-level config for this invocation (Lambda is single-threaded per invocation)
-            // This ensures all helper functions can access the correct domain-specific config
-            const oldConfig = config;
-            config = domainConfig || config;
+            // Config is already loaded from loadDomainConfig(detectedDomain) above
+            // It includes firebaseApp and AWS clients, all cached
             
-            // Get or initialize Firebase app for this database URL
-            const cacheKey = `${firebaseConfig.databaseURL}:${config.ssmPrefix}`;
-            if (!firebaseAppCache.has(cacheKey)) {
-                try {
-                    console.log(`[FIREBASE] Initializing Firebase for database: ${firebaseConfig.databaseURL} with SSM prefix: ${config.ssmPrefix}`);
-                    firebaseApp = await firebaseInitializer.get(firebaseConfig.databaseURL, config.ssmPrefix);
-                    firebaseAppCache.set(cacheKey, firebaseApp);
-                    console.log('[FIREBASE] Firebase initialized successfully');
-                } catch (error) {
-                    console.error('Failed to initialize Firebase:', error);
-                    console.error('Firebase initialization error name:', error.name);
-                    console.error('Firebase initialization error code:', error.code);
-                    console.error('Firebase initialization error message:', error.message);
-                    console.error('Firebase initialization error stack:', error.stack);
-                    return {
-                        statusCode: 500,
-                        headers,
-                        body: JSON.stringify({ 
-                            error: `Failed to initialize Firebase: ${error.message}`,
-                            errorCode: error.code || error.name,
-                            details: process.env.NODE_ENV === 'development' ? error.stack : undefined
-                        })
-                    };
-                }
-            } else {
-                firebaseApp = firebaseAppCache.get(cacheKey);
+            // Check if Firebase app is available
+            if (!config.firebaseApp) {
+                console.error('[ERROR] Firebase app not available for domain:', detectedDomain);
+                return {
+                    statusCode: 500,
+                    headers,
+                    body: JSON.stringify({ 
+                        error: `Firebase app not initialized for domain ${detectedDomain}`,
+                        errorCode: 'ConfigurationError'
+                    })
+                };
             }
+            
+            // Use Firebase app from config
+            const firebaseApp = config.firebaseApp;
             
             if (!path) {
                 console.log('No proxy path found, returning 404');
@@ -533,16 +780,6 @@ exports.handler = async (event, context) => {
                     statusCode: 404,
                     headers,
                     body: JSON.stringify({ error: 'No path specified' })
-                };
-            }
-            
-            // Ensure firebaseApp is initialized for all other endpoints
-            if (!firebaseApp) {
-                console.error('firebaseApp is not initialized');
-                return {
-                    statusCode: 500,
-                    headers,
-                    body: JSON.stringify({ error: 'Firebase not initialized' })
                 };
             }
 
@@ -557,7 +794,7 @@ exports.handler = async (event, context) => {
                         };
                     }
                     const decodedToken = await firebaseApp.auth().verifyIdToken(token);
-                    return await handleUpload(event, decodedToken.uid, headers);
+                    return await handleUpload(event, decodedToken.uid, headers, config);
                 case 'setupEmail':
                     const setupToken = getAuthToken();
                     if (!setupToken) {
@@ -568,7 +805,7 @@ exports.handler = async (event, context) => {
                         };
                     }
                     const setupDecodedToken = await firebaseApp.auth().verifyIdToken(setupToken);
-                    return await handleSetupEmail(event, setupDecodedToken, headers);
+                    return await handleSetupEmail(event, setupDecodedToken, headers, config);
                 
                 case 'getEmails':
                     const emailToken = getAuthToken();
@@ -580,7 +817,7 @@ exports.handler = async (event, context) => {
                         };
                     }
                     const emailDecodedToken = await firebaseApp.auth().verifyIdToken(emailToken);
-                    return await handleGetEmails(event, emailDecodedToken.uid, headers);
+                    return await handleGetEmails(event, emailDecodedToken.uid, headers, config);
                 
                 case 'getEmailStats':
                     const statsToken = getAuthToken();
@@ -592,7 +829,7 @@ exports.handler = async (event, context) => {
                         };
                     }
                     const statsDecodedToken = await firebaseApp.auth().verifyIdToken(statsToken);
-                    return await handleGetEmailStats(event, statsDecodedToken.uid, headers);
+                    return await handleGetEmailStats(event, statsDecodedToken.uid, headers, config);
                 
                 case 'sendEmail':
                     const sendToken = getAuthToken();
@@ -604,8 +841,63 @@ exports.handler = async (event, context) => {
                         };
                     }
                     try {
-                        const sendDecodedToken = await firebaseApp.auth().verifyIdToken(sendToken);
-                        return await handleSendEmail(event, sendDecodedToken, headers);
+                        // Parse request body to check if domain is provided by frontend
+                        let requestBody;
+                        try {
+                            const decodedBody = event.isBase64Encoded 
+                                ? Buffer.from(event.body, 'base64').toString('utf-8')
+                                : event.body;
+                            requestBody = typeof decodedBody === 'string' ? JSON.parse(decodedBody) : decodedBody;
+                        } catch (parseError) {
+                            console.error('[SENDEMAIL] Error parsing request body:', parseError);
+                        }
+                        
+                        // If domain is provided in request body, use it (frontend can pass it)
+                        let requestDomain = requestBody?.domain || null;
+                        let finalDomain = detectedDomain;
+                        let finalConfig = config;
+                        
+                        if (requestDomain) {
+                            console.log(`[SENDEMAIL] Domain provided in request body: ${requestDomain}`);
+                            // Validate that the domain matches the detected domain or is a valid alternative
+                            // For now, we'll use it if header detection failed
+                            if (!detectedDomain || detectedDomain.includes('execute-api')) {
+                                console.log(`[SENDEMAIL] Using domain from request body: ${requestDomain}`);
+                                finalDomain = extractDomainFromHost(requestDomain);
+                                // Reload config with the domain from request (includes firebaseApp)
+                                try {
+                                    finalConfig = await loadDomainConfig(finalDomain);
+                                    console.log(`[SENDEMAIL] Reloaded config for domain: ${finalDomain}`);
+                                } catch (reloadError) {
+                                    console.error(`[SENDEMAIL] Failed to reload config for domain ${finalDomain}:`, reloadError);
+                                    return {
+                                        statusCode: 500,
+                                        headers,
+                                        body: JSON.stringify({ 
+                                            error: `Invalid domain provided: ${requestDomain}`,
+                                            errorCode: 'ConfigurationError'
+                                        })
+                                    };
+                                }
+                            }
+                        }
+                        
+                        const sendDecodedToken = await finalConfig.firebaseApp.auth().verifyIdToken(sendToken);
+                        
+                        // Validate that user has permission for this domain
+                        // Check if user's email domain matches the detected domain
+                        const userEmail = sendDecodedToken.email || '';
+                        const userDomain = userEmail.includes('@') ? userEmail.split('@')[1] : null;
+                        
+                        console.log(`[SENDEMAIL] User email: ${userEmail}, User domain: ${userDomain}, Detected domain: ${finalDomain}`);
+                        
+                        // Allow if user's email domain matches, or if user has a profile with this domain
+                        // For now, we'll allow it - you can add more sophisticated domain validation here
+                        if (userDomain && userDomain !== finalDomain) {
+                            console.log(`[SENDEMAIL] User domain (${userDomain}) doesn't match detected domain (${finalDomain}), but allowing (profile check can be added)`);
+                        }
+                        
+                        return await handleSendEmail(event, sendDecodedToken, headers, finalConfig);
                     } catch (tokenError) {
                         console.error('Error verifying token for sendEmail:', tokenError);
                         console.error('Token error details:', {
@@ -631,7 +923,7 @@ exports.handler = async (event, context) => {
                         };
                     }
                     const deleteDecodedToken = await firebaseApp.auth().verifyIdToken(deleteToken);
-                    return await handleDeleteEmail(event, deleteDecodedToken.uid, headers);
+                    return await handleDeleteEmail(event, deleteDecodedToken.uid, headers, config);
                 
                 case 'loadEmail':
                     const loadToken = getAuthToken();
@@ -643,7 +935,11 @@ exports.handler = async (event, context) => {
                         };
                     }
                     const loadDecodedToken = await firebaseApp.auth().verifyIdToken(loadToken);
-                    return await handleLoadEmail(event, loadDecodedToken.uid, headers);
+                    return await handleLoadEmail(event, loadDecodedToken.uid, headers, config, context);
+
+                case 'inlineImage':
+                    // No Bearer required: auth is via signed token in query (for img src cacheable URLs)
+                    return await handleInlineImage(event, headers, config);
                 
                 default:
                     return {
@@ -662,13 +958,8 @@ exports.handler = async (event, context) => {
             
             return {
                 statusCode: 500,
-                headers,
-                body: JSON.stringify({ 
-                    error: 'Internal server error',
-                    message: error.message || 'An unexpected error occurred',
-                    errorCode: error.code || error.name,
-                    details: process.env.NODE_ENV === 'development' ? error.stack : undefined
-                })
+                headers: json500Headers(headers),
+                body: buildApiErrorJsonBody(error, context)
             };
         }
         } catch (error) {
@@ -680,26 +971,22 @@ exports.handler = async (event, context) => {
             console.error('Error stack:', error.stack);
             console.error('Full error object:', JSON.stringify(error, Object.getOwnPropertyNames(error)));
             
-            // Return a detailed error response
             return {
                 statusCode: 500,
-                headers: {
-                    'Access-Control-Allow-Origin': '*',
-                    'Content-Type': 'application/json'
-                },
-                body: JSON.stringify({ 
-                    error: 'Internal server error',
-                    message: error.message || 'An unexpected error occurred',
-                    errorCode: error.code || error.name,
-                    details: process.env.NODE_ENV === 'development' ? error.stack : undefined
-                })
+                headers: json500Headers({
+                    'Access-Control-Allow-Origin': '*'
+                }),
+                body: buildApiErrorJsonBody(error, context)
             };
         }
 };
 async function handleSesEvent(event, domainConfig) {
-    // Update module-level config for this invocation (Lambda is single-threaded per invocation)
-    const oldConfig = config;
-    config = domainConfig || config;
+    // Use the passed-in domain config (no module-level config in Lambda)
+    const config = domainConfig;
+    if (!config) {
+        console.error('[ERROR] handleSesEvent called without domainConfig');
+        return { statusCode: 500, body: JSON.stringify({ error: 'Configuration not available' }) };
+    }
     
     console.log('=== SES EVENT RECEIVED ===');
     console.log('Full SES event:', JSON.stringify(event, null, 2));
@@ -737,11 +1024,13 @@ async function handleSesEvent(event, domainConfig) {
                         Key: s3Key
                     };
                     
-                    const s3Result = await s3.getObject(s3Params).promise();
+                    // Use cached S3 client from config
+                    const s3Client = config.s3Client || s3;
+                    const s3Result = await s3Client.send(new GetObjectCommand(s3Params));
                     console.log('[OK] Successfully read email from S3');
                     
                     // Parse the email content from S3
-                    const emailContent = s3Result.Body.toString('utf-8');
+                    const emailContent = await s3BodyToUtf8(s3Result.Body);
                     console.log('Email content from S3:', emailContent.substring(0, 500) + '...');
                     
                     // First, parse the email to get headers and raw body
@@ -780,7 +1069,7 @@ async function handleSesEvent(event, domainConfig) {
                         if (recipient.endsWith(`@${emailDomain}`)) {
                             const username = recipient.split('@')[0];
                             console.log(`[OK] Found @${emailDomain} recipient:`, username);
-                            await storeEmailForUser(username, ses.mail.messageId, emailData);
+                            await storeEmailForUser(username, ses.mail.messageId, emailData, config);
                             processedCount++;
                             hasMatchingRecipient = true;
                         } else {
@@ -841,11 +1130,15 @@ async function handleSesEvent(event, domainConfig) {
 }
 
 // Helper: save email content to S3
-async function saveEmailContentToS3(uid, emailId, content, folder = 'emails') {
+async function saveEmailContentToS3(uid, emailId, content, folder = 'emails', configParam = null) {
     try {
-        const bucketName = config.s3BucketName || process.env.S3_BUCKET_NAME || 'vcmail-mail-inbox';
+        // Use provided config or fallback to environment variable
+        const bucketName = (configParam && configParam.s3BucketName) || process.env.S3_BUCKET_NAME || 'vcmail-mail-inbox';
         const s3Key = `${folder}/${uid}/${emailId}/body`;
         console.log(`[PACKAGE] Saving email content to S3: s3://${bucketName}/${s3Key}`);
+        
+        // Use cached S3 client from config if available, otherwise use global fallback
+        const s3Client = (configParam && configParam.s3Client) || s3;
         
         // Ensure content is a Buffer with proper UTF-8 encoding
         const contentBuffer = Buffer.from(content, 'utf-8');
@@ -859,7 +1152,7 @@ async function saveEmailContentToS3(uid, emailId, content, folder = 'emails') {
             ServerSideEncryption: 'AES256'
         };
         
-        await s3.putObject(s3Params).promise();
+        await s3Client.send(new PutObjectCommand(s3Params));
         console.log(`[OK] Email content saved to S3 (${contentBuffer.length} bytes)`);
         
         return s3Key;
@@ -870,12 +1163,16 @@ async function saveEmailContentToS3(uid, emailId, content, folder = 'emails') {
 }
 
 // Helper: save attachment to S3
-async function saveAttachmentToS3(uid, emailId, attachmentIndex, attachmentData, folder = 'emails') {
+async function saveAttachmentToS3(uid, emailId, attachmentIndex, attachmentData, folder = 'emails', configParam = null) {
     try {
-        const bucketName = config.s3BucketName || process.env.S3_BUCKET_NAME || 'vcmail-mail-inbox';
+        // Use provided config or fallback to environment variable
+        const bucketName = (configParam && configParam.s3BucketName) || process.env.S3_BUCKET_NAME || 'vcmail-mail-inbox';
         const filename = attachmentData.filename || `attachment-${attachmentIndex}`;
         const s3Key = `${folder}/${uid}/${emailId}/attachments/${attachmentIndex}-${filename}`;
         console.log(`[PACKAGE] Saving attachment to S3: s3://${bucketName}/${s3Key}`);
+        
+        // Use cached S3 client from config if available, otherwise use global fallback
+        const s3Client = (configParam && configParam.s3Client) || s3;
         
         // Determine if content is base64 or raw
         let bodyContent;
@@ -899,7 +1196,7 @@ async function saveAttachmentToS3(uid, emailId, attachmentIndex, attachmentData,
             ServerSideEncryption: 'AES256'
         };
         
-        await s3.putObject(s3Params).promise();
+        await s3Client.send(new PutObjectCommand(s3Params));
         console.log(`[OK] Attachment saved to S3`);
         
         return {
@@ -915,9 +1212,16 @@ async function saveAttachmentToS3(uid, emailId, attachmentIndex, attachmentData,
     }
 }
 
-async function storeEmailForUser(username, messageId, emailData) {
+async function storeEmailForUser(username, messageId, emailData, configParam = null) {
     console.log(`[INFO] Storing email for user: ${username}`);
     console.log(`Message ID: ${messageId}`);
+    
+    if (!configParam || !configParam.firebaseApp) {
+        console.error('[ERROR] firebaseApp is not available in storeEmailForUser');
+        return;
+    }
+    
+    const firebaseApp = configParam.firebaseApp;
     
     try {
         // First, look up the UID for this username using the new usernames structure
@@ -927,7 +1231,8 @@ async function storeEmailForUser(username, messageId, emailData) {
         
         if (!usernameSnapshot.exists()) {
             console.error(`[ERROR] No user found for username: ${username}`);
-            console.error(`[ERROR] Email will not be stored. User must set up email address at ${config.domain || 'example.com'}`);
+            const domain = (configParam && configParam.domain) ? configParam.domain : (config && config.domain) ? config.domain : 'example.com';
+            console.error(`[ERROR] Email will not be stored. User must set up email address at ${domain}`);
             console.error(`[ERROR] Email details: from=${emailData.from}, to=${emailData.to}, subject=${emailData.subject}`);
             // Don't throw - just log and return. The email was already accepted by SES.
             return;
@@ -963,7 +1268,7 @@ async function storeEmailForUser(username, messageId, emailData) {
         
         // Save email content to S3
         const emailContent = preferredContent || emailData.body;
-        const contentS3Key = await saveEmailContentToS3(uid, emailKey, emailContent, 'emails');
+        const contentS3Key = await saveEmailContentToS3(uid, emailKey, emailContent, 'emails', configParam || config);
         console.log(`[OK] Email content saved to S3: ${contentS3Key}`);
         
         // Save attachments to S3 if any
@@ -972,7 +1277,7 @@ async function storeEmailForUser(username, messageId, emailData) {
             for (let i = 0; i < emailStructure.attachments.length; i++) {
                 const attachment = emailStructure.attachments[i];
                 try {
-                    const s3Info = await saveAttachmentToS3(uid, emailKey, i, attachment, 'emails');
+                    const s3Info = await saveAttachmentToS3(uid, emailKey, i, attachment, 'emails', configParam || config);
                     if (s3Info) {
                         attachmentS3Keys.push({
                             ...s3Info,
@@ -1043,6 +1348,11 @@ async function storeEmailForUser(username, messageId, emailData) {
                     // Only add isInline if defined
                     if (att.isInline !== undefined) {
                         attMetadata.isInline = att.isInline;
+                    }
+                    
+                    // contentId is needed for resolving cid: references in HTML (inline images)
+                    if (att.contentId) {
+                        attMetadata.contentId = att.contentId;
                     }
                     
                     // Only add s3Key if it exists
@@ -1451,7 +1761,17 @@ function parseEmailContent(content) {
         };
     }
 }
-async function handleUpload(event, userId, headers) {
+async function handleUpload(event, userId, headers, config) {
+    if (!config || !config.firebaseApp) {
+        return {
+            statusCode: 500,
+            headers,
+            body: JSON.stringify({ error: 'firebaseApp is not defined' })
+        };
+    }
+    
+    const firebaseApp = config.firebaseApp;
+    
     console.log('Raw event body:', event.body);
     console.log('Is base64 encoded:', event.isBase64Encoded);
     
@@ -1505,12 +1825,15 @@ async function handleUpload(event, userId, headers) {
         Expires: 300
     });
 
+    // Use cached S3 client from config if available
+    const s3Client = (config && config.s3Client) || s3;
+    
     // Generate presigned URL for upload
-    const presignedUrl = await s3.getSignedUrlPromise('putObject', {
-        Bucket: webmailBucket,
-        Key: filename,
-        ContentType: contentType,
-        Expires: 300
+    const presignedUrl = await presignPutObject(s3Client, {
+        bucket: webmailBucket,
+        key: filename,
+        contentType: contentType,
+        expiresIn: 300
     });
 
     console.log('Generated presigned URL:', presignedUrl);
@@ -1565,7 +1888,17 @@ function decodeEmailFromFirebase(encodedEmail) {
         .replace(/_dot_/g, '.');
 }
 
-async function handleSetupEmail(event, decodedToken, headers) {
+async function handleSetupEmail(event, decodedToken, headers, config) {
+    if (!config || !config.firebaseApp) {
+        return {
+            statusCode: 500,
+            headers,
+            body: JSON.stringify({ error: 'firebaseApp is not defined' })
+        };
+    }
+    
+    const firebaseApp = config.firebaseApp;
+    
     try {
         let body;
         try {
@@ -1667,7 +2000,17 @@ async function handleSetupEmail(event, decodedToken, headers) {
     }
 }
 
-async function handleGetEmails(event, uid, headers) {
+async function handleGetEmails(event, uid, headers, config) {
+    if (!config || !config.firebaseApp) {
+        return {
+            statusCode: 500,
+            headers,
+            body: JSON.stringify({ error: 'firebaseApp is not defined' })
+        };
+    }
+    
+    const firebaseApp = config.firebaseApp;
+    
     try {
         // Parse query parameters for pagination
         const queryParams = event.queryStringParameters || {};
@@ -1753,7 +2096,17 @@ async function handleGetEmails(event, uid, headers) {
     }
 }
 
-async function handleGetEmailStats(event, uid, headers) {
+async function handleGetEmailStats(event, uid, headers, config) {
+    if (!config || !config.firebaseApp) {
+        return {
+            statusCode: 500,
+            headers,
+            body: JSON.stringify({ error: 'firebaseApp is not defined' })
+        };
+    }
+    
+    const firebaseApp = config.firebaseApp;
+    
     try {
         const userStatsRef = firebaseApp.database().ref(`users/${uid}/emailStats`);
         const statsSnapshot = await userStatsRef.once('value');
@@ -1792,8 +2145,52 @@ async function handleGetEmailStats(event, uid, headers) {
     }
 }
 
-async function handleSendEmail(event, decodedToken, headers) {
+// Normalize an email address by converting Unicode variants (bold, full-width, accented, etc.)
+// into plain ASCII characters and stripping any remaining non-ASCII symbols.
+function normalizeEmailAddress(input) {
+    if (!input || typeof input !== 'string') return input;
+
+    let value = input;
+
+    // Use Unicode normalization (NFKD) when available to fold compatibility characters
+    // like full-width or mathematical bold letters back to their ASCII equivalents.
     try {
+        if (typeof value.normalize === 'function') {
+            value = value.normalize('NFKD');
+        }
+    } catch (e) {
+        // If normalization is not supported, continue with the original string.
+    }
+
+    // Strip combining diacritical marks (accents, etc.)
+    value = value.replace(/[\u0300-\u036f]/g, '');
+
+    // Map a few common Unicode punctuation variants to ASCII.
+    value = value
+        .replace(/[\uFF20]/g, '@') // full-width @
+        .replace(/[\uFF0E\u2024\uFE52\uFF61]/g, '.') // full-width / dotted variants
+        .replace(/[\u2018\u2019\u201B\u2032]/g, "'") // curly/single quotes
+        .replace(/[\u201C\u201D\u201F\u2033]/g, '"'); // curly/double quotes
+
+    // Finally, drop any remaining non-ASCII characters.
+    value = value.replace(/[^\x00-\x7F]/g, '');
+
+    return value.trim();
+}
+
+async function handleSendEmail(event, decodedToken, headers, config = null) {
+    try {
+        if (!config || !config.firebaseApp) {
+            console.error('[SENDEMAIL] Config or firebaseApp not available in handleSendEmail');
+            return {
+                statusCode: 500,
+                headers,
+                body: JSON.stringify({ error: 'Configuration or Firebase not available' })
+            };
+        }
+        
+        const firebaseApp = config.firebaseApp;
+        
         let body;
         try {
             const decodedBody = event.isBase64Encoded 
@@ -1819,8 +2216,11 @@ async function handleSendEmail(event, decodedToken, headers) {
             };
         }
 
+        // Normalize recipient address to plain ASCII to avoid Unicode variants
+        const normalizedTo = normalizeEmailAddress(to);
+
         // Basic email validation
-        if (!to.match(/^[^\s@]+@[^\s@]+\.[^\s@]+$/)) {
+        if (!normalizedTo.match(/^[^\s@]+@[^\s@]+\.[^\s@]+$/)) {
             return {
                 statusCode: 400,
                 headers,
@@ -1841,12 +2241,13 @@ async function handleSendEmail(event, decodedToken, headers) {
         }
 
         const senderUsername = profileSnapshot.val().username;
-        const emailDomain = config.domain || 'example.com';
+        const emailDomain = (config && config.domain) ? config.domain : 'example.com';
+        console.log(`[SENDEMAIL] Using domain: ${emailDomain} for sender email`);
         const senderEmail = `${senderUsername}@${emailDomain}`;
 
         // Check if sending to same domain - handle directly without SES
-        if (to.endsWith(`@${emailDomain}`)) {
-            const recipientUsername = to.split('@')[0];
+        if (normalizedTo.endsWith(`@${emailDomain}`)) {
+            const recipientUsername = normalizedTo.split('@')[0];
             console.log(`[INFO] Same-domain email detected. Recipient: ${recipientUsername}`);
             
             // Check if recipient exists
@@ -1869,10 +2270,11 @@ async function handleSendEmail(event, decodedToken, headers) {
             
             // Create email content in raw format (similar to what SES stores)
             const dateHeader = new Date().toUTCString();
-            const rawEmail = `From: ${senderEmail}\r\nTo: ${to}\r\nSubject: ${subject}\r\nDate: ${dateHeader}\r\nMessage-ID: <${messageId}@${emailDomain}>\r\nMIME-Version: 1.0\r\nContent-Type: text/plain; charset=UTF-8\r\nContent-Transfer-Encoding: 7bit\r\n\r\n${emailBody}`;
+            const rawEmail = `From: ${senderEmail}\r\nTo: ${normalizedTo}\r\nSubject: ${subject}\r\nDate: ${dateHeader}\r\nMessage-ID: <${messageId}@${emailDomain}>\r\nMIME-Version: 1.0\r\nContent-Type: text/plain; charset=UTF-8\r\nContent-Transfer-Encoding: 7bit\r\n\r\n${emailBody}`;
             
             // Save to S3 (same bucket as SES uses)
             const bucketName = config.s3BucketName || process.env.S3_BUCKET_NAME || 'vcmail-mail-inbox';
+            const s3Client = config.s3Client || s3;
             const s3Params = {
                 Bucket: bucketName,
                 Key: messageId,
@@ -1880,13 +2282,13 @@ async function handleSendEmail(event, decodedToken, headers) {
                 ContentType: 'message/rfc822'
             };
             
-            await s3.putObject(s3Params).promise();
+            await s3Client.send(new PutObjectCommand(s3Params));
             console.log(`[OK] Email saved to S3: s3://${bucketName}/${messageId}`);
             
             // Create emailData structure similar to what parseEmailContent creates
             const emailData = {
                 from: senderEmail,
-                to: to,
+                to: normalizedTo,
                 subject: subject,
                 body: emailBody,
                 headers: {
@@ -1898,11 +2300,11 @@ async function handleSendEmail(event, decodedToken, headers) {
             };
             
             // Store in Firebase using existing function (for recipient's inbox)
-            await storeEmailForUser(recipientUsername, messageId, emailData);
+            await storeEmailForUser(recipientUsername, messageId, emailData, config);
             
             // Also store in sender's sent folder (save to S3)
             const sentEmailKey = `email_${Date.now()}`;
-            const sentContentS3Key = await saveEmailContentToS3(uid, sentEmailKey, emailBody, 'sent');
+            const sentContentS3Key = await saveEmailContentToS3(uid, sentEmailKey, emailBody, 'sent', config);
             console.log(`[OK] Sent email content saved to S3: ${sentContentS3Key}`);
             
             const sentEmailRecord = {
@@ -1942,14 +2344,15 @@ async function handleSendEmail(event, decodedToken, headers) {
             };
         }
 
-        // External domain - use SES
-        const sesRegion = config.awsRegion || process.env.AWS_REGION || 'us-east-1';
-        const ses = new AWS.SES({ region: sesRegion });
+        // External domain - use SES (use cached client from config)
+        const sesClient = config.sesClient || new SESClient({ 
+            region: config.awsRegion || process.env.AWS_REGION || 'us-east-1' 
+        });
         
         const emailParams = {
             Source: senderEmail,
             Destination: {
-                ToAddresses: [to]
+                ToAddresses: [normalizedTo]
             },
             Message: {
                 Subject: {
@@ -1970,19 +2373,19 @@ async function handleSendEmail(event, decodedToken, headers) {
 
         console.log('Attempting to send email via SES with params:', JSON.stringify(emailParams, null, 2));
         
-        const sesResult = await ses.sendEmail(emailParams).promise();
+        const sesResult = await sesClient.send(new SendEmailCommand(emailParams));
         console.log('Email sent via SES successfully:', sesResult);
         console.log('Email will be processed by SES receipt rule and stored in Firebase automatically');
         
         // Store in sender's sent folder (for external emails, save to S3)
         const sentEmailKey = `email_${Date.now()}`;
-        const sentContentS3Key = await saveEmailContentToS3(uid, sentEmailKey, emailBody, 'sent');
+        const sentContentS3Key = await saveEmailContentToS3(uid, sentEmailKey, emailBody, 'sent', config);
         console.log(`[OK] Sent email content saved to S3: ${sentContentS3Key}`);
         
         const sentEmailRecord = {
             messageId: sesResult.MessageId,
             from: senderEmail,
-            to: to,
+            to: normalizedTo,
             subject: subject,
             contentType: 'text/plain',
             timestamp: Date.now(),
@@ -2024,7 +2427,7 @@ async function handleSendEmail(event, decodedToken, headers) {
         console.error('Full error object:', JSON.stringify(error, Object.getOwnPropertyNames(error)));
         
         // Handle SES-specific errors
-        if (error.code === 'MessageRejected') {
+        if (error.code === 'MessageRejected' || error.name === 'MessageRejected') {
             return {
                 statusCode: 400,
                 headers,
@@ -2033,7 +2436,7 @@ async function handleSendEmail(event, decodedToken, headers) {
                     details: error.message 
                 })
             };
-        } else if (error.code === 'ConfigurationSetDoesNotExist') {
+        } else if (error.code === 'ConfigurationSetDoesNotExist' || error.name === 'ConfigurationSetDoesNotExist') {
             return {
                 statusCode: 500,
                 headers,
@@ -2156,7 +2559,9 @@ function parseMultipartStructure(rawBody, boundary) {
         const body = bodyMatch[1].trim();
         const contentType = headers['content-type'] || '';
         const contentDisposition = headers['content-disposition'] || '';
-        const contentId = headers['content-id'] || headers['content-id'] || '';
+        const contentIdRaw = headers['content-id'] || headers['content-id'] || '';
+        // Normalize Content-ID: strip angle brackets (e.g. <image002.png@01DCA19A.EC89C680> -> image002.png@01DCA19A.EC89C680)
+        const contentId = contentIdRaw ? contentIdRaw.replace(/^<|>$/g, '').trim() : '';
         const filename = extractFilename(contentDisposition);
         
         // Check if this is inline (has Content-ID or content-disposition: inline)
@@ -2172,7 +2577,8 @@ function parseMultipartStructure(rawBody, boundary) {
             filename: filename,
             encoding: headers['content-transfer-encoding'] || '',
             size: body.length,
-            isInline: isInline
+            isInline: isInline,
+            contentId: contentId || undefined
         };
         
         // Check if this is a nested multipart
@@ -2210,19 +2616,26 @@ function parseMultipartStructure(rawBody, boundary) {
             }
         }
         
-        // Check if this is an attachment (not inline content)
+        // Check if this is an attachment (including inline CID images for HTML body)
         // An attachment is:
         // 1. Has Content-Disposition: attachment
         // 2. OR has a filename but is NOT inline AND is not text/html or text/plain
         // 3. OR has a filename and Content-Disposition doesn't explicitly say "inline"
+        // 4. OR is inline with Content-ID (CID) and not text/html or text/plain — these are inline images
+        //    referenced in HTML as src="cid:..."; we must expose them as attachments so the client can resolve cid: URLs
         const hasFilename = !!filename;
         const hasAttachmentDisposition = contentDisposition.toLowerCase().includes('attachment');
         const hasInlineDisposition = contentDisposition.toLowerCase().includes('inline');
         
-        const isAttachment = hasAttachmentDisposition || 
-            (hasFilename && !hasInlineDisposition && !isInline && contentType && 
-             !contentType.includes('text/html') && !contentType.includes('text/plain') && 
-             !contentType.includes('multipart/'));
+        const isInlineCidPart = isInline && !!contentId && contentType &&
+            !contentType.includes('text/html') && !contentType.includes('text/plain') &&
+            !contentType.includes('multipart/');
+        
+        const isAttachment = hasAttachmentDisposition ||
+            (hasFilename && !hasInlineDisposition && !isInline && contentType &&
+             !contentType.includes('text/html') && !contentType.includes('text/plain') &&
+             !contentType.includes('multipart/')) ||
+            isInlineCidPart;
         
         // Log attachment check (sanitize all strings to avoid Unicode issues)
         try {
@@ -2310,6 +2723,9 @@ function parseMultipartStructure(rawBody, boundary) {
                 isInline: isInline,
                 originalEncoding: transferEncoding
             };
+            if (contentId) {
+                attachment.contentId = contentId;
+            }
             
             // For text-based attachments, include decoded content as string
             if (contentType.includes('text/') || contentType.includes('application/json') || 
@@ -2421,8 +2837,92 @@ function decodePartContent(body, encoding) {
     }
 }
 
-async function handleLoadEmail(event, uid, headers) {
+async function handleInlineImage(event, headers, config) {
+    const queryParams = event.queryStringParameters || {};
+    const token = queryParams.t;
+    if (!token) {
+        return { statusCode: 400, headers, body: JSON.stringify({ error: 'Missing token (t)' }) };
+    }
+    const payload = verifyInlineImageToken(token, config);
+    if (!payload || !payload.uid || !payload.emailId || !payload.contentId || !payload.folder) {
+        return { statusCode: 403, headers, body: JSON.stringify({ error: 'Invalid or expired token' }) };
+    }
+    const { uid, emailId, contentId, folder } = payload;
+    if (!['emails', 'sent'].includes(folder)) {
+        return { statusCode: 400, headers, body: JSON.stringify({ error: 'Invalid folder' }) };
+    }
+    if (!config || !config.firebaseApp) {
+        return { statusCode: 500, headers, body: JSON.stringify({ error: 'Configuration not available' }) };
+    }
+    const firebaseApp = config.firebaseApp;
+    const firebasePath = folder === 'emails' ? `emails/${uid}/${emailId}` : `sent/${uid}/${emailId}`;
+    const emailRef = firebaseApp.database().ref(firebasePath);
+    const emailSnapshot = await emailRef.once('value');
+    if (!emailSnapshot.exists()) {
+        return { statusCode: 404, headers, body: JSON.stringify({ error: 'Email not found' }) };
+    }
+    const emailData = emailSnapshot.val();
+    const contentIdLower = String(contentId).trim().toLowerCase();
+    let s3Key = null;
+    let contentType = 'application/octet-stream';
+    const attachmentsS3 = emailData.attachmentsS3 || [];
+    for (const att of attachmentsS3) {
+        const attCid = (att.contentId || '').trim().toLowerCase();
+        if (attCid === contentIdLower && att.s3Key) {
+            s3Key = att.s3Key;
+            contentType = att.contentType || contentType;
+            break;
+        }
+    }
+    if (!s3Key && emailData.structure && emailData.structure.attachments) {
+        for (let i = 0; i < emailData.structure.attachments.length; i++) {
+            const att = emailData.structure.attachments[i];
+            const attCid = (att.contentId || '').trim().toLowerCase();
+            if (attCid === contentIdLower && att.s3Key) {
+                s3Key = att.s3Key;
+                contentType = att.contentType || contentType;
+                break;
+            }
+        }
+    }
+    if (!s3Key) {
+        return { statusCode: 404, headers, body: JSON.stringify({ error: 'Inline image not found' }) };
+    }
+    const bucketName = config.s3BucketName || process.env.S3_BUCKET_NAME || 'vcmail-mail-inbox';
+    const s3Client = (config && config.s3Client) || s3;
     try {
+        const result = await s3Client.send(new GetObjectCommand({ Bucket: bucketName, Key: s3Key }));
+        const bodyBytes = await s3BodyToBuffer(result.Body);
+        const cacheControl = `private, max-age=${INLINE_IMAGE_CACHE_MAX_AGE}`;
+        return {
+            statusCode: 200,
+            headers: {
+                ...headers,
+                'Content-Type': result.ContentType || contentType,
+                'Cache-Control': cacheControl,
+                'Content-Length': String(bodyBytes.length)
+            },
+            body: bodyBytes.toString('base64'),
+            isBase64Encoded: true
+        };
+    } catch (err) {
+        console.error('[inlineImage] S3 getObject error:', err);
+        return { statusCode: 404, headers, body: JSON.stringify({ error: 'Image not found' }) };
+    }
+}
+
+async function handleLoadEmail(event, uid, headers, config, lambdaContext) {
+    try {
+        if (!config || !config.firebaseApp) {
+            return {
+                statusCode: 500,
+                headers,
+                body: JSON.stringify({ error: 'firebaseApp is not defined' })
+            };
+        }
+        
+        const firebaseApp = config.firebaseApp;
+        
         const queryParams = event.queryStringParameters || {};
         const emailId = queryParams.emailId;
         const folder = queryParams.folder || 'emails'; // 'emails' for inbox, 'sent' for sent folder
@@ -2512,6 +3012,9 @@ async function handleLoadEmail(event, uid, headers) {
         
         const bucketName = config.s3BucketName || process.env.S3_BUCKET_NAME || 'vcmail-mail-inbox';
         
+        // Use cached S3 client from config if available
+        const s3Client = (config && config.s3Client) || s3;
+        
         // Handle backward compatibility: old emails might have content directly in Firebase
         let contentUrl = null;
         let emailContent = null;
@@ -2535,33 +3038,75 @@ async function handleLoadEmail(event, uid, headers) {
             needsAttachmentParsing: needsAttachmentParsing
         });
         
-        if (emailData.contentS3Key && !needsAttachmentParsing) {
-            // New format: content is in S3, and we already have attachments
+        // Prioritize contentS3Key if it exists (for sent emails and new format emails)
+        if (emailData.contentS3Key) {
+            // New format: content is in S3
             const contentS3Key = emailData.contentS3Key;
             try {
-                contentUrl = await s3.getSignedUrlPromise('getObject', {
-                    Bucket: bucketName,
-                    Key: contentS3Key,
-                    Expires: 900 // 15 minutes
-                });
-                console.log(`[OK] Generated presigned URL for email content from S3: ${contentS3Key}`);
+                // Verify the object exists before generating presigned URL
+                // This prevents NoSuchKey errors when the URL is accessed
+                try {
+                    await s3Client.send(new HeadObjectCommand({
+                        Bucket: bucketName,
+                        Key: contentS3Key
+                    }));
+                    console.log(`[OK] Verified S3 object exists: ${contentS3Key}`);
+                    
+                    // Object exists, generate presigned URL
+                    contentUrl = await presignGetObject(s3Client, {
+                        bucket: bucketName,
+                        key: contentS3Key,
+                        expiresIn: 900
+                    });
+                    console.log(`[OK] Generated presigned URL for email content from S3: ${contentS3Key}`);
+                } catch (headError) {
+                    if (isS3NotFound(headError)) {
+                        console.warn(`[WARN] S3 object not found at ${contentS3Key}, will try fallback paths`);
+                        // Don't set contentUrl here, let fallback logic handle it
+                    } else {
+                        throw headError; // Re-throw other errors
+                    }
+                }
+                
+                // If we don't need attachment parsing, we're done - contentUrl is set
+                // If we do need attachment parsing, we'll still try to parse from messageId location below
+                // but contentUrl will be available as a fallback
             } catch (s3Error) {
                 console.error(`[ERROR] Error generating presigned URL for ${contentS3Key}:`, s3Error);
-                // Fallback: try old SES messageId location
-                if (emailData.messageId) {
+                // Fallback: try old SES messageId location if available
+                if (emailData.messageId && !emailData.messageId.startsWith('local_')) {
                     try {
-                        contentUrl = await s3.getSignedUrlPromise('getObject', {
-                            Bucket: bucketName,
-                            Key: emailData.messageId,
-                            Expires: 900
-                        });
-                        console.log(`[OK] Generated presigned URL from old SES location: ${emailData.messageId}`);
+                        // Also verify this object exists
+                        try {
+                            await s3Client.send(new HeadObjectCommand({
+                                Bucket: bucketName,
+                                Key: emailData.messageId
+                            }));
+                            console.log(`[OK] Verified fallback S3 object exists: ${emailData.messageId}`);
+                            
+                            contentUrl = await presignGetObject(s3Client, {
+                                bucket: bucketName,
+                                key: emailData.messageId,
+                                expiresIn: 900
+                            });
+                            console.log(`[OK] Generated presigned URL from old SES location: ${emailData.messageId}`);
+                        } catch (headError) {
+                            if (isS3NotFound(headError)) {
+                                console.warn(`[WARN] Fallback S3 object not found at ${emailData.messageId}`);
+                                // Don't generate URL if object doesn't exist
+                            } else {
+                                throw headError;
+                            }
+                        }
                     } catch (oldS3Error) {
                         console.error(`[ERROR] Error accessing old SES location:`, oldS3Error);
                     }
                 }
             }
-        } else if (emailData.messageId && needsAttachmentParsing) {
+        }
+        
+        // If we need attachment parsing and have a messageId (and contentS3Key didn't work or we need to parse attachments)
+        if (emailData.messageId && needsAttachmentParsing && !emailData.messageId.startsWith('local_')) {
             // CRITICAL: Parse from old SES location to get attachments
             console.log(`[EMAIL] Parsing from old SES location to extract attachments (messageId: ${emailData.messageId})`);
             // CRITICAL: Always check old SES location if messageId exists
@@ -2570,12 +3115,12 @@ async function handleLoadEmail(event, uid, headers) {
             console.log(`[EMAIL] Checking old SES location for attachments (messageId: ${emailData.messageId})`);
             try {
                 console.log(`[EMAIL] Loading raw email from old SES location: ${emailData.messageId}`);
-                const rawEmailResult = await s3.getObject({
+                const rawEmailResult = await s3Client.send(new GetObjectCommand({
                     Bucket: bucketName,
                     Key: emailData.messageId
-                }).promise();
+                }));
                 
-                const rawEmailContent = rawEmailResult.Body.toString('utf-8');
+                const rawEmailContent = await s3BodyToUtf8(rawEmailResult.Body);
                 console.log(`[OK] Loaded raw email from SES location (${rawEmailContent.length} chars)`);
                 
                 // Parse the raw email to extract content and attachments
@@ -2673,25 +3218,38 @@ async function handleLoadEmail(event, uid, headers) {
                                             partKey: att.partKey || `part_${idx}`
                                         };
                                         
-                                        const s3Info = await saveAttachmentToS3(uid, actualEmailId, idx, attachmentData, folder);
+                                        const s3Info = await saveAttachmentToS3(uid, actualEmailId, idx, attachmentData, folder, config);
                                         
                                         if (s3Info) {
                                             // Generate presigned URL for the attachment
-                                            const attachmentUrl = await s3.getSignedUrlPromise('getObject', {
-                                                Bucket: bucketName,
-                                                Key: s3Info.s3Key,
-                                                Expires: 900,
-                                                ResponseContentDisposition: `attachment; filename="${s3Info.filename}"`
+                                            const attachmentUrl = await presignGetObject(s3Client, {
+                                                bucket: bucketName,
+                                                key: s3Info.s3Key,
+                                                expiresIn: 900,
+                                                responseContentDisposition: `attachment; filename="${s3Info.filename}"`
                                             });
                                             
-                                            parsedAttachments.push({
+                                            const parsedEntry = {
                                                 filename: s3Info.filename,
                                                 contentType: s3Info.contentType,
                                                 size: s3Info.size,
                                                 url: attachmentUrl,
                                                 isInline: att.isInline || false,
-                                                partKey: att.partKey || `part_${idx}`
-                                            });
+                                                partKey: att.partKey || `part_${idx}`,
+                                                ...(att.contentId && { contentId: att.contentId })
+                                            };
+                                            if (att.contentId) {
+                                                parsedEntry.inlineImageToken = createInlineImageToken(uid, actualEmailId, att.contentId, folder, config);
+                                            }
+                                            await tryAddInlineIcsBodyToAttachmentEntry(
+                                                parsedEntry,
+                                                s3Info.s3Key,
+                                                s3Info.size,
+                                                s3Client,
+                                                bucketName,
+                                                'parsed:'
+                                            );
+                                            parsedAttachments.push(parsedEntry);
                                             const safeS3Filename = s3Info.filename ? s3Info.filename.replace(/[^\x00-\x7F]/g, '?') : 'unknown';
                                             console.log(`[OK] Attachment ${idx} saved to S3 and URL generated: ${safeS3Filename}`);
                                         } else {
@@ -2755,19 +3313,43 @@ async function handleLoadEmail(event, uid, headers) {
             } catch (s3Error) {
                 console.error(`[ERROR] Error loading/parsing old SES email ${emailData.messageId}:`, s3Error);
             }
-        } else {
-            // Fallback: try constructed path
-            const fallbackS3Key = `${folder}/${uid}/${emailId}/body`;
+        }
+        
+        // Fallback: if we still don't have a contentUrl, try constructed path
+        if (!contentUrl) {
+            const fallbackS3Key = `${folder}/${uid}/${actualEmailId}/body`;
             try {
-                contentUrl = await s3.getSignedUrlPromise('getObject', {
-                    Bucket: bucketName,
-                    Key: fallbackS3Key,
-                    Expires: 900
-                });
-                console.log(`[OK] Generated presigned URL from fallback path: ${fallbackS3Key}`);
+                // Verify the object exists before generating presigned URL
+                try {
+                    await s3Client.send(new HeadObjectCommand({
+                        Bucket: bucketName,
+                        Key: fallbackS3Key
+                    }));
+                    console.log(`[OK] Verified fallback S3 object exists: ${fallbackS3Key}`);
+                    
+                    contentUrl = await presignGetObject(s3Client, {
+                        bucket: bucketName,
+                        key: fallbackS3Key,
+                        expiresIn: 900
+                    });
+                    console.log(`[OK] Generated presigned URL from fallback path: ${fallbackS3Key}`);
+                } catch (headError) {
+                    if (isS3NotFound(headError)) {
+                        console.warn(`[WARN] Fallback S3 object not found at ${fallbackS3Key}`);
+                        // Don't generate URL if object doesn't exist
+                    } else {
+                        throw headError;
+                    }
+                }
             } catch (s3Error) {
                 console.error(`[ERROR] Error accessing fallback path:`, s3Error);
             }
+        }
+        
+        // Final fallback: if we still don't have a contentUrl, check if content is available directly in Firebase
+        if (!contentUrl && emailData.content && emailData.content.length > 0) {
+            console.log(`[OK] Using content directly from Firebase (fallback, ${emailData.content.length} chars)`);
+            emailContent = emailData.content;
         }
         
         // Generate presigned URLs for attachments if any
@@ -2777,21 +3359,32 @@ async function handleLoadEmail(event, uid, headers) {
         if (emailData.attachmentsS3 && emailData.attachmentsS3.length > 0) {
             for (const attachment of emailData.attachmentsS3) {
                 try {
-                    const attachmentUrl = await s3.getSignedUrlPromise('getObject', {
-                        Bucket: bucketName,
-                        Key: attachment.s3Key,
-                        Expires: 900, // 15 minutes
-                        ResponseContentDisposition: `attachment; filename="${attachment.filename}"`
+                    const attachmentUrl = await presignGetObject(s3Client, {
+                        bucket: bucketName,
+                        key: attachment.s3Key,
+                        expiresIn: 900,
+                        responseContentDisposition: `attachment; filename="${attachment.filename}"`
                     });
-                    
-                    attachmentUrls.push({
+                    const attEntry = {
                         filename: attachment.filename,
                         contentType: attachment.contentType,
                         size: attachment.size,
                         url: attachmentUrl,
                         isInline: attachment.isInline,
-                        partKey: attachment.partKey
-                    });
+                        partKey: attachment.partKey,
+                        ...(attachment.contentId && { contentId: attachment.contentId })
+                    };
+                    if (attachment.contentId) {
+                        attEntry.inlineImageToken = createInlineImageToken(uid, actualEmailId, attachment.contentId, folder, config);
+                    }
+                    await tryAddInlineIcsBodyToAttachmentEntry(
+                        attEntry,
+                        attachment.s3Key,
+                        attachment.size,
+                        s3Client,
+                        bucketName
+                    );
+                    attachmentUrls.push(attEntry);
                 } catch (attError) {
                     console.error(`[ERROR] Error generating presigned URL for attachment ${attachment.s3Key}:`, attError);
                 }
@@ -2807,35 +3400,52 @@ async function handleLoadEmail(event, uid, headers) {
                 // If attachment has s3Key, try to load from S3
                 if (attachment.s3Key) {
                     try {
-                        const attachmentUrl = await s3.getSignedUrlPromise('getObject', {
-                            Bucket: bucketName,
-                            Key: attachment.s3Key,
-                            Expires: 900,
-                            ResponseContentDisposition: `attachment; filename="${attachment.filename || `attachment-${i}`}"`
+                        const attachmentUrl = await presignGetObject(s3Client, {
+                            bucket: bucketName,
+                            key: attachment.s3Key,
+                            expiresIn: 900,
+                            responseContentDisposition: `attachment; filename="${attachment.filename || `attachment-${i}`}"`
                         });
-                        
-                        attachmentUrls.push({
+                        const attEntry = {
                             filename: attachment.filename || `attachment-${i}`,
                             contentType: attachment.contentType || 'application/octet-stream',
                             size: attachment.size || 0,
                             url: attachmentUrl,
                             isInline: attachment.isInline || false,
-                            partKey: attachment.partKey || `part_${i}`
-                        });
+                            partKey: attachment.partKey || `part_${i}`,
+                            ...(attachment.contentId && { contentId: attachment.contentId })
+                        };
+                        if (attachment.contentId) {
+                            attEntry.inlineImageToken = createInlineImageToken(uid, actualEmailId, attachment.contentId, folder, config);
+                        }
+                        await tryAddInlineIcsBodyToAttachmentEntry(
+                            attEntry,
+                            attachment.s3Key,
+                            attachment.size,
+                            s3Client,
+                            bucketName,
+                            'structure:'
+                        );
+                        attachmentUrls.push(attEntry);
                     } catch (attError) {
                         console.error(`[ERROR] Error generating presigned URL for attachment ${attachment.s3Key}:`, attError);
                     }
                 } else if (attachment.content) {
                     // Attachment content is embedded (old format) - include it directly
-                    attachmentUrls.push({
+                    const attEntry = {
                         filename: attachment.filename || `attachment-${i}`,
                         contentType: attachment.contentType || 'application/octet-stream',
                         size: attachment.size || (attachment.content ? attachment.content.length : 0),
                         content: attachment.content,
                         encoding: attachment.encoding || 'text',
                         isInline: attachment.isInline || false,
-                        partKey: attachment.partKey || `part_${i}`
-                    });
+                        partKey: attachment.partKey || `part_${i}`,
+                        ...(attachment.contentId && { contentId: attachment.contentId })
+                    };
+                    if (attachment.contentId) {
+                        attEntry.inlineImageToken = createInlineImageToken(uid, actualEmailId, attachment.contentId, folder, config);
+                    }
+                    attachmentUrls.push(attEntry);
                 }
             }
             console.log(`[OK] Extracted ${attachmentUrls.length} attachments from old structure format`);
@@ -2902,13 +3512,23 @@ async function handleLoadEmail(event, uid, headers) {
         });
         return {
             statusCode: 500,
-            headers,
-            body: JSON.stringify({ error: error.message || 'Internal server error' })
+            headers: json500Headers(headers),
+            body: buildApiErrorJsonBody(error, lambdaContext)
         };
     }
 }
 
-async function handleDeleteEmail(event, uid, headers) {
+async function handleDeleteEmail(event, uid, headers, config) {
+    if (!config || !config.firebaseApp) {
+        return {
+            statusCode: 500,
+            headers,
+            body: JSON.stringify({ error: 'firebaseApp is not defined' })
+        };
+    }
+    
+    const firebaseApp = config.firebaseApp;
+    
     try {
         let body;
         try {

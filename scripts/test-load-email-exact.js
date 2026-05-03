@@ -3,7 +3,7 @@
  * This replicates the exact request: /api/loadEmail?emailId=email_1767802922770&folder=emails
  */
 
-const AWS = require('aws-sdk');
+const { S3Client, GetObjectCommand } = require('@aws-sdk/client-s3');
 const path = require('path');
 
 // Load configuration
@@ -24,9 +24,8 @@ async function testLoadEmailExact() {
         console.log('✅ Configuration loaded');
 
         // Initialize S3
-        const s3 = new AWS.S3({
-            region: config.awsRegion || 'us-east-1',
-            signatureVersion: 'v4'
+        const s3 = new S3Client({
+            region: config.awsRegion || 'us-east-1'
         });
         const bucketName = config.s3BucketName;
 
@@ -91,12 +90,12 @@ async function testLoadEmailExact() {
             
             try {
                 console.log(`[EMAIL] Loading raw email from old SES location: ${emailData.messageId}`);
-                const rawEmailResult = await s3.getObject({
+                const rawEmailResult = await s3.send(new GetObjectCommand({
                     Bucket: bucketName,
                     Key: emailData.messageId
-                }).promise();
+                }));
                 
-                const rawEmailContent = rawEmailResult.Body.toString('utf-8');
+                const rawEmailContent = await rawEmailResult.Body.transformToString('utf-8');
                 console.log(`[OK] Loaded raw email from SES location (${rawEmailContent.length} chars)`);
                 
                 // Import parsing functions

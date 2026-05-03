@@ -4,7 +4,14 @@
  * Checks SES receipt rules and Lambda configuration for multiple domains
  */
 
-const AWS = require('aws-sdk');
+const {
+  SESClient,
+  DescribeActiveReceiptRuleSetCommand,
+  ListIdentitiesCommand,
+  GetIdentityVerificationAttributesCommand
+} = require('@aws-sdk/client-ses');
+const { LambdaClient, GetFunctionCommand } = require('@aws-sdk/client-lambda');
+const { Route53Client, ListHostedZonesByNameCommand, ListResourceRecordSetsCommand } = require('@aws-sdk/client-route-53');
 const { getConfigWithDefaults } = require('../lib/config');
 const fs = require('fs-extra');
 const path = require('path');
@@ -22,8 +29,8 @@ async function checkMultiDomainSetup() {
   
   const config = getConfigWithDefaults(await fs.readJson(configPath));
   const region = config.awsRegion || 'us-east-1';
-  const ses = new AWS.SES({ region });
-  const lambda = new AWS.Lambda({ region });
+  const ses = new SESClient({ region });
+  const lambda = new LambdaClient({ region });
   
   console.log(`📧 Configured Domain: ${config.domain}`);
   console.log(`🌍 AWS Region: ${region}\n`);
@@ -31,32 +38,32 @@ async function checkMultiDomainSetup() {
   // 1. Check Lambda Environment Variables
   console.log('1️⃣ Checking Lambda Configuration...');
   try {
-    const functionName = `${config.projectName || config.domain.replace(/\./g, '-')}-api`;
-    const func = await lambda.getFunction({ FunctionName: functionName }).promise();
+    const functionName = 'VCMail-api';  // Shared Lambda name for all projects
+    const func = await lambda.send(new GetFunctionCommand({ FunctionName: functionName }));
+    
+    console.log(`   ✅ Shared Lambda function "${functionName}" exists`);
+    console.log(`   📝 This Lambda loads domain-specific config from SSM at runtime`);
+    console.log(`   📝 Domain: ${config.domain} (config loaded from SSM prefix: ${config.ssmPrefix || 'derived from domain'})`);
     
     if (func.Configuration.Environment && func.Configuration.Environment.Variables) {
       const env = func.Configuration.Environment.Variables;
-      
-      if (env.VCMAIL_CONFIG) {
-        const vcmailConfig = JSON.parse(env.VCMAIL_CONFIG);
-        console.log(`   ✅ Lambda VCMAIL_CONFIG found`);
-        console.log(`   Domain in Lambda: ${vcmailConfig.domain}`);
-        
-        if (vcmailConfig.domain !== config.domain) {
-          console.log(`   ⚠️  WARNING: Lambda domain (${vcmailConfig.domain}) doesn't match config domain (${config.domain})`);
-        }
-      } else {
-        console.log(`   ❌ VCMAIL_CONFIG not found in Lambda environment`);
-      }
+      console.log(`   Environment Variables:`);
+      console.log(`      - AWS_REGION: ${env.AWS_REGION || 'Auto-detected by Lambda'}`);
+      console.log(`      - Domain-specific config: Loaded from SSM at runtime`);
     }
   } catch (error) {
-    console.log(`   ⚠️  Error checking Lambda: ${error.message}`);
+    if (error.name === 'ResourceNotFoundException' || error.code === 'ResourceNotFoundException') {
+      console.log(`   ❌ Shared Lambda function "VCMail-api" NOT FOUND`);
+      console.log(`   📝 Run "npx vcmail" to deploy the shared Lambda function`);
+    } else {
+      console.log(`   ⚠️  Error checking Lambda: ${error.message}`);
+    }
   }
   
   // 2. Check Active SES Rule Set
   console.log('\n2️⃣ Checking Active SES Rule Set...');
   try {
-    const activeRuleSet = await ses.describeActiveReceiptRuleSet().promise();
+    const activeRuleSet = await ses.send(new DescribeActiveReceiptRuleSetCommand({}));
     
     if (activeRuleSet.Metadata) {
       console.log(`   ✅ Active Rule Set: ${activeRuleSet.Metadata.Name}`);
@@ -144,7 +151,7 @@ async function checkMultiDomainSetup() {
       console.log(`   ⚠️  No active rule set found`);
     }
   } catch (error) {
-    if (error.code === 'RuleSetDoesNotExist') {
+    if (error.name === 'RuleSetDoesNotExist' || error.code === 'RuleSetDoesNotExist') {
       console.log(`   ❌ No active rule set found`);
       console.log(`   📝 Run "npx vcmail" to create a rule set`);
     } else {
@@ -156,14 +163,14 @@ async function checkMultiDomainSetup() {
   console.log('\n4️⃣ Checking Domain Verification...');
   try {
     // Get all verified identities
-    const identities = await ses.listIdentities({ IdentityType: 'Domain' }).promise();
+    const identities = await ses.send(new ListIdentitiesCommand({ IdentityType: 'Domain' }));
     
     if (identities.Identities && identities.Identities.length > 0) {
       console.log(`   Found ${identities.Identities.length} verified domain(s):\n`);
       
-      const verificationAttrs = await ses.getIdentityVerificationAttributes({
+      const verificationAttrs = await ses.send(new GetIdentityVerificationAttributesCommand({
         Identities: identities.Identities
-      }).promise();
+      }));
       
       for (const domain of identities.Identities) {
         const verification = verificationAttrs.VerificationAttributes[domain];
@@ -186,14 +193,14 @@ async function checkMultiDomainSetup() {
   // 5. Check MX Records
   console.log('\n5️⃣ Checking MX Records...');
   try {
-    const route53 = new AWS.Route53();
-    const zones = await route53.listHostedZonesByName({ DNSName: config.domain }).promise();
+    const route53 = new Route53Client({});
+    const zones = await route53.send(new ListHostedZonesByNameCommand({ DNSName: config.domain }));
     const zone = zones.HostedZones.find(z => z.Name === `${config.domain}.`);
     
     if (zone) {
-      const records = await route53.listResourceRecordSets({
+      const records = await route53.send(new ListResourceRecordSetsCommand({
         HostedZoneId: zone.Id
-      }).promise();
+      }));
       
       const mxRecords = records.ResourceRecordSets.filter(r => r.Type === 'MX');
       

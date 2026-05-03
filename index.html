@@ -12,6 +12,7 @@
       webmailDomain: "mail.example.com",
       apiEndpoint: "https://api.example.com",
       storageCacheKey: "vcmail_email_cache",
+      googleOAuthClientId: "",
       firebase: {
         apiKey: "your-api-key",
         authDomain: "your-project.firebaseapp.com",
@@ -246,6 +247,60 @@
       
       <div class="settings-container">
         <div class="settings-section">
+          <h3>Account Information</h3>
+          <div class="account-info">
+            <div class="info-item">
+              <span class="info-label">Email Address:</span>
+              <span class="info-value" id="account-email">Loading...</span>
+            </div>
+            <div class="info-item">
+              <span class="info-label">User ID:</span>
+              <span class="info-value" id="account-uid">Loading...</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="settings-section" id="calendar-settings-section">
+          <h3>Google Calendar</h3>
+          <div id="calendar-settings-disabled" class="hidden">
+            <p class="settings-description">
+              <strong>Firebase “Sign in with Google” is separate from Calendar here.</strong> This page only enables Calendar after
+              <code>googleOAuthClientId</code> is set in <code>vcmail.config.json</code> and the webmail app is redeployed so
+              <code>window.VCMAIL_CONFIG.googleOAuthClientId</code> is non-empty (check in DevTools).
+              Use a <strong>Google Cloud OAuth 2.0 Client ID</strong> of type <em>Web application</em>; enable the Calendar API on that project.
+              Under <strong>APIs &amp; Credentials → that OAuth client → Authorized JavaScript origins</strong>, add this site’s origin
+              (e.g. <code>https://mail.yourdomain.com</code>). Firebase’s “Authorized domains” list does not replace that step for the token client.
+              You may reuse the same Web client ID Firebase uses if you add the webmail origin there.
+            </p>
+          </div>
+          <div id="calendar-settings-active" class="hidden">
+            <p id="calendar-google-signin-hint" class="settings-description hidden">
+              You signed in with Google. Use <strong>Connect Google Calendar</strong> below with the same Google account so invitations can be added to the calendar you choose.
+            </p>
+            <p class="settings-description">
+              Connect once on this device to add <code>.ics</code> invitations from email into a calendar you select. Duplicate detection compares the invitation to events on the same day (by UID and start time). Access tokens stay in this browser only. After an upgrade, use <strong>Disconnect</strong> then connect again if your calendar list does not load (OAuth scopes may have changed).
+            </p>
+            <div class="cache-actions">
+              <button type="button" class="btn" id="calendar-connect-btn">Connect Google Calendar</button>
+              <button type="button" class="btn btn-secondary hidden" id="calendar-disconnect-btn">Disconnect</button>
+            </div>
+            <div class="storage-info" style="margin-top: 12px;">
+              <div class="info-item">
+                <span class="info-label">Status</span>
+                <span class="info-value" id="calendar-connection-status">Not connected</span>
+              </div>
+            </div>
+            <div id="gcal-target-calendar-wrap" class="hidden" style="margin-top: 16px;">
+              <label for="gcal-target-calendar-select" class="settings-field-label">Add invitations to this calendar</label>
+              <select id="gcal-target-calendar-select" class="input settings-select" aria-label="Target Google calendar for ICS imports"></select>
+              <p class="settings-description" style="margin-top: 8px;">
+                Shown after you connect. Imports and duplicate checks use this calendar.
+              </p>
+            </div>
+          </div>
+        </div>
+
+        <div class="settings-section">
           <h3>Storage Information</h3>
           <div class="storage-info" id="storage-info">
             <div class="info-item">
@@ -280,20 +335,6 @@
           <p class="settings-description">
             Clearing the cache will remove all locally stored emails. They will be reloaded from the server when needed.
           </p>
-        </div>
-
-        <div class="settings-section">
-          <h3>Account Information</h3>
-          <div class="account-info">
-            <div class="info-item">
-              <span class="info-label">Email Address:</span>
-              <span class="info-value" id="account-email">Loading...</span>
-            </div>
-            <div class="info-item">
-              <span class="info-label">User ID:</span>
-              <span class="info-value" id="account-uid">Loading...</span>
-            </div>
-          </div>
         </div>
       </div>
     </section>

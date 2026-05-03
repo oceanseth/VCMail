@@ -4,7 +4,7 @@
  * Example: node scripts/test-parse-email-direct.js ng5khvjqvgcg7fqerigjh97uvkebnb95j0forco1 voicecert-com-mail-inbox
  */
 
-const AWS = require('aws-sdk');
+const { S3Client, GetObjectCommand } = require('@aws-sdk/client-s3');
 
 // Get command line arguments
 const messageId = process.argv[2];
@@ -23,18 +23,17 @@ async function testParseEmail() {
         console.log(`   Key: ${messageId}\n`);
 
         // Initialize S3
-        const s3 = new AWS.S3({
-            region: 'us-east-1',
-            signatureVersion: 'v4'
+        const s3 = new S3Client({
+            region: 'us-east-1'
         });
 
         // Load raw email from S3
-        const rawEmailObject = await s3.getObject({
+        const rawEmailObject = await s3.send(new GetObjectCommand({
             Bucket: bucketName,
             Key: messageId
-        }).promise();
+        }));
 
-        const rawEmailContent = rawEmailObject.Body.toString('utf-8');
+        const rawEmailContent = await rawEmailObject.Body.transformToString('utf-8');
         console.log(`✅ Loaded raw email from S3 (${rawEmailContent.length} bytes)\n`);
 
         // Parse email headers to extract content-type

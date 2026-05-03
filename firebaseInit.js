@@ -1,11 +1,16 @@
-const AWS = require('aws-sdk');
+const { SSMClient, GetParameterCommand } = require('@aws-sdk/client-ssm');
 const admin = require('firebase-admin');
 
-// Load configuration
+// Load configuration (Lambda package has no ./lib/config — only load from disk outside Lambda)
 let config = {};
 try {
   if (process.env.VCMAIL_CONFIG) {
     config = JSON.parse(process.env.VCMAIL_CONFIG);
+  } else if (process.env.AWS_LAMBDA_FUNCTION_NAME || process.env.LAMBDA_TASK_ROOT) {
+    config = {
+      ssmPrefix: process.env.SSM_PREFIX || '/vcmail/prod',
+      awsRegion: process.env.AWS_REGION || 'us-east-1'
+    };
   } else {
     const { loadConfig } = require('./lib/config');
     config = loadConfig(process.cwd());
@@ -19,11 +24,10 @@ try {
 }
 
 const awsRegion = config.awsRegion || process.env.AWS_REGION || 'us-east-1';
-AWS.config.update({ region: awsRegion });
 
 class FirebaseInitializer {
   constructor() {
-    this.ssm = new AWS.SSM({ region: awsRegion });
+    this.ssm = new SSMClient({ region: awsRegion });
     this.firebaseAppMap = new Map();
   }
 
@@ -52,14 +56,14 @@ class FirebaseInitializer {
       
       let result;
       try {
-        result = await this.ssm.getParameter(params).promise();
+        result = await this.ssm.send(new GetParameterCommand(params));
         console.log(`Successfully retrieved SSM parameter: ${paramName}`);
       } catch (ssmError) {
         console.error(`Failed to get SSM parameter ${paramName}:`, ssmError);
-        console.error(`SSM Error Code: ${ssmError.code}`);
+        console.error(`SSM Error Code: ${ssmError.name || ssmError.code}`);
         console.error(`SSM Error Message: ${ssmError.message}`);
         console.error(`SSM Error Stack: ${ssmError.stack}`);
-        throw new Error(`Failed to retrieve Firebase service account from SSM parameter ${paramName}: ${ssmError.code} - ${ssmError.message}`);
+        throw new Error(`Failed to retrieve Firebase service account from SSM parameter ${paramName}: ${ssmError.name || ssmError.code} - ${ssmError.message}`);
       }
       
       if (!result?.Parameter?.Value) {

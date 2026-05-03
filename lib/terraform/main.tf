@@ -3,18 +3,14 @@
 
 terraform {
   required_version = ">= 1.0"
-  
+
   required_providers {
     aws = {
       source  = "hashicorp/aws"
       version = "~> 5.0"
     }
-    archive = {
-      source  = "hashicorp/archive"
-      version = "~> 2.4"
-    }
   }
-  
+
   # Optional: Uncomment to use S3 backend for state management
   # backend "s3" {
   #   bucket = "your-terraform-state-bucket"
@@ -36,21 +32,21 @@ data "aws_caller_identity" "current" {}
 # S3 Bucket for email inbox (where SES stores incoming emails)
 resource "aws_s3_bucket" "mail_inbox" {
   bucket = var.s3_bucket_name
-  
+
   # Allow bucket deletion even when it contains objects/versions
   # This is necessary for Terraform to manage bucket lifecycle
   force_destroy = true
-  
+
   tags = {
-    Name        = "VCMail Email Inbox"
-    Project     = var.project_name
-    ManagedBy   = "Terraform"
+    Name      = "VCMail Email Inbox"
+    Project   = var.project_name
+    ManagedBy = "Terraform"
   }
 }
 
 resource "aws_s3_bucket_versioning" "mail_inbox" {
   bucket = aws_s3_bucket.mail_inbox.id
-  
+
   versioning_configuration {
     status = "Enabled"
   }
@@ -94,11 +90,11 @@ resource "aws_s3_bucket_policy" "mail_inbox" {
 # S3 Bucket for webmail client
 resource "aws_s3_bucket" "webmail" {
   bucket = var.s3_webmail_bucket_name
-  
+
   tags = {
-    Name        = "VCMail Webmail Client"
-    Project     = var.project_name
-    ManagedBy   = "Terraform"
+    Name      = "VCMail Webmail Client"
+    Project   = var.project_name
+    ManagedBy = "Terraform"
   }
 }
 
@@ -174,6 +170,13 @@ resource "aws_cloudfront_distribution" "webmail" {
       https_port             = 443
       origin_protocol_policy = "https-only"
       origin_ssl_protocols   = ["TLSv1.2"]
+    }
+
+    # Add custom header to forward the original Host header
+    # This allows Lambda to extract the domain from requests
+    custom_header {
+      name  = "X-Original-Host"
+      value = var.mail_domain
     }
   }
 
@@ -274,9 +277,9 @@ resource "aws_acm_certificate" "webmail" {
 
 # ACM Certificate validation
 resource "aws_acm_certificate_validation" "webmail" {
-  certificate_arn = aws_acm_certificate.webmail.arn
+  certificate_arn         = aws_acm_certificate.webmail.arn
   validation_record_fqdns = [for record in aws_route53_record.cert_validation : record.fqdn]
-  
+
   timeouts {
     create = "5m"
   }
@@ -305,7 +308,7 @@ resource "aws_route53_record" "webmail" {
   zone_id = data.aws_route53_zone.main.zone_id
   name    = var.mail_domain
   type    = "A"
-  
+
   # Allow overwriting existing records (prevents conflicts when record already exists)
   allow_overwrite = true
 
@@ -332,11 +335,11 @@ resource "aws_ses_domain_identity_verification" "main" {
 
 # Route53 Record for SES domain verification
 resource "aws_route53_record" "ses_verification" {
-  zone_id        = data.aws_route53_zone.main.zone_id
-  name           = "_amazonses.${var.domain}"
-  type           = "TXT"
-  ttl            = 600
-  records        = [aws_ses_domain_identity.main.verification_token]
+  zone_id         = data.aws_route53_zone.main.zone_id
+  name            = "_amazonses.${var.domain}"
+  type            = "TXT"
+  ttl             = 600
+  records         = [aws_ses_domain_identity.main.verification_token]
   allow_overwrite = true
 }
 
@@ -347,12 +350,12 @@ resource "aws_ses_domain_dkim" "main" {
 
 # Route53 Records for SES DKIM
 resource "aws_route53_record" "dkim" {
-  count          = 3
-  zone_id        = data.aws_route53_zone.main.zone_id
-  name           = "${aws_ses_domain_dkim.main.dkim_tokens[count.index]}._domainkey.${var.domain}"
-  type           = "CNAME"
-  ttl            = 600
-  records        = ["${aws_ses_domain_dkim.main.dkim_tokens[count.index]}.dkim.amazonses.com"]
+  count           = 3
+  zone_id         = data.aws_route53_zone.main.zone_id
+  name            = "${aws_ses_domain_dkim.main.dkim_tokens[count.index]}._domainkey.${var.domain}"
+  type            = "CNAME"
+  ttl             = 600
+  records         = ["${aws_ses_domain_dkim.main.dkim_tokens[count.index]}.dkim.amazonses.com"]
   allow_overwrite = true
 }
 
@@ -405,22 +408,22 @@ resource "aws_ses_domain_mail_from" "main" {
 # Route53 MX record for MAIL FROM domain (required by SES)
 # SES requires this MX record to verify the MAIL FROM domain
 resource "aws_route53_record" "mail_from_mx" {
-  zone_id = data.aws_route53_zone.main.zone_id
-  name    = aws_ses_domain_mail_from.main.mail_from_domain
-  type    = "MX"
-  ttl     = 600
-  records = ["10 feedback-smtp.${var.aws_region}.amazonses.com"]
+  zone_id         = data.aws_route53_zone.main.zone_id
+  name            = aws_ses_domain_mail_from.main.mail_from_domain
+  type            = "MX"
+  ttl             = 600
+  records         = ["10 feedback-smtp.${var.aws_region}.amazonses.com"]
   allow_overwrite = true
 }
 
 # Route53 SPF record for MAIL FROM domain (required for DMARC alignment)
 # This SPF record authorizes Amazon SES to send emails on behalf of the MAIL FROM domain
 resource "aws_route53_record" "mail_from_spf" {
-  zone_id = data.aws_route53_zone.main.zone_id
-  name    = aws_ses_domain_mail_from.main.mail_from_domain
-  type    = "TXT"
-  ttl     = 600
-  records = ["v=spf1 include:amazonses.com ~all"]
+  zone_id         = data.aws_route53_zone.main.zone_id
+  name            = aws_ses_domain_mail_from.main.mail_from_domain
+  type            = "TXT"
+  ttl             = 600
+  records         = ["v=spf1 include:amazonses.com ~all"]
   allow_overwrite = true
 }
 
@@ -438,49 +441,19 @@ resource "aws_ses_configuration_set" "main" {
   }
 }
 
-# Determine which rule set to use
+# Canonical SES rule set is managed by the account stack (.vcmail-terraform-account). This stack only adds receipt rules.
 locals {
-  # Use existing VCMail rule set if provided, otherwise use project-specific one
-  # This ensures we always use the active rule set if one exists, preventing duplicate rule sets
-  rule_set_name = var.shared_rule_set_name != "" ? var.shared_rule_set_name : "${var.project_name}-incoming-email"
-  
-  # Only create/activate rule set if we're not using a shared one
-  # When using a shared rule set, we never create or activate - we just add our rule to it
-  should_manage_rule_set = var.shared_rule_set_name == ""
+  rule_set_name = var.shared_rule_set_name != "" ? var.shared_rule_set_name : "vcmail_rule_set"
 }
 
-# SES Receipt Rule Set (for processing incoming emails)
-# Only create if not using a shared rule set
-resource "aws_ses_receipt_rule_set" "main" {
-  count        = local.should_manage_rule_set ? 1 : 0
-  rule_set_name = local.rule_set_name
-  
-  lifecycle {
-    # Prevent Terraform from deleting the rule set if it exists
-    # This avoids errors when the rule set is already active
-    prevent_destroy = false
-    create_before_destroy = false
-  }
+data "aws_lambda_function" "email_processor" {
+  function_name = "VCMail-api"
 }
 
-# Activate the rule set
-# Only activate if we created the rule set (not using a shared one)
-resource "aws_ses_active_receipt_rule_set" "main" {
-  count        = local.should_manage_rule_set ? 1 : 0
-  rule_set_name = aws_ses_receipt_rule_set.main[0].rule_set_name
-  
-  lifecycle {
-    # Prevent accidental deletion of active rule set
-    # Must manually deactivate before destroying
-    prevent_destroy = false
-  }
-}
-
-# SES Receipt Rule (to store emails in S3 and invoke Lambda)
-# ALWAYS create - adds rule to either shared or new rule set
+# SES Receipt Rule (per domain): S3 + shared Lambda + stop action on the canonical rule set
 resource "aws_ses_receipt_rule" "main" {
   name          = "${var.project_name}-email-rule"
-  rule_set_name = local.rule_set_name  # References rule set by name (works even if not in Terraform state)
+  rule_set_name = local.rule_set_name # References rule set by name (works even if not in Terraform state)
   enabled       = true
   scan_enabled  = true
 
@@ -494,7 +467,7 @@ resource "aws_ses_receipt_rule" "main" {
   }
 
   lambda_action {
-    function_arn    = aws_lambda_function.email_processor.arn
+    function_arn    = data.aws_lambda_function.email_processor.arn
     invocation_type = "Event"
     position        = 2
   }
@@ -505,171 +478,12 @@ resource "aws_ses_receipt_rule" "main" {
     scope    = "RuleSet"
     position = 3
   }
-  
+
   lifecycle {
     # Only recreate if the configuration actually changes
     # This prevents unnecessary updates when Terraform state drifts
     create_before_destroy = true
   }
-}
-
-# Create Lambda deployment package
-# This packages the Lambda code and dependencies
-# Note: vcmail-lambda-package is created in the project root (one level up from .vcmail-terraform)
-data "archive_file" "lambda_zip" {
-  type        = "zip"
-  source_dir  = "${path.module}/../vcmail-lambda-package"
-  output_path = "${path.module}/lambda-package.zip"
-  excludes    = ["node_modules/.cache", "node_modules/**/test", "node_modules/**/tests", "*.test.js", "*.spec.js"]
-  
-  depends_on = [] # Lambda package should be prepared before Terraform runs
-}
-
-# Shared Lambda function for processing emails from all domains
-# All projects use the same Lambda function name: VCMail-api
-# The Lambda detects the domain from request headers (API Gateway) or SES recipients and loads config from SSM
-resource "aws_lambda_function" "email_processor" {
-  filename         = data.archive_file.lambda_zip.output_path
-  function_name    = "VCMail-api"  # Fixed name shared across all projects
-  role             = aws_iam_role.lambda_email_processor.arn
-  handler          = "api/api.handler"
-  source_code_hash = data.archive_file.lambda_zip.output_base64sha256
-  runtime          = "nodejs18.x"
-  timeout          = 30
-  memory_size      = 1024  # Increased from 256MB to handle large emails with attachments (27MB email + 18MB attachment needs more memory)
-
-  # Minimal environment variables - domain-specific config is loaded from SSM at runtime
-  environment {
-    variables = {
-      AWS_REGION = var.aws_region
-    }
-  }
-
-  tags = {
-    Name      = "VCMail Email Processor"
-    Project   = "VCMail-Shared"
-    ManagedBy = "Terraform"
-  }
-  
-  # Allow multiple projects to manage the same Lambda
-  # The Lambda code and configuration are idempotent
-  lifecycle {
-    ignore_changes = [
-      # Ignore source_code_hash changes from other projects updating the Lambda
-      # All projects should deploy the same code
-      source_code_hash
-    ]
-  }
-}
-
-# Lambda permission for SES
-resource "aws_lambda_permission" "ses" {
-  statement_id  = "AllowExecutionFromSES"
-  action        = "lambda:InvokeFunction"
-  function_name = aws_lambda_function.email_processor.function_name
-  principal     = "ses.amazonaws.com"
-  source_account = data.aws_caller_identity.current.account_id
-}
-
-# Shared IAM Role for Lambda email processor
-# All projects use the same role name: VCMail-api-role
-resource "aws_iam_role" "lambda_email_processor" {
-  name = "VCMail-api-role"  # Fixed name shared across all projects
-
-  assume_role_policy = jsonencode({
-    Version = "2012-10-17"
-    Statement = [
-      {
-        Action = "sts:AssumeRole"
-        Effect = "Allow"
-        Principal = {
-          Service = "lambda.amazonaws.com"
-        }
-      }
-    ]
-  })
-
-  tags = {
-    Name      = "VCMail Lambda Role"
-    Project   = "VCMail-Shared"
-    ManagedBy = "Terraform"
-  }
-  
-  # Allow multiple projects to manage the same role
-  lifecycle {
-    ignore_changes = [
-      # Ignore assume_role_policy changes from other projects
-      # All projects should use the same policy
-      assume_role_policy
-    ]
-  }
-}
-
-# Shared IAM Policy for Lambda email processor
-# All projects use the same policy name: VCMail-api-policy
-resource "aws_iam_role_policy" "lambda_email_processor" {
-  name = "VCMail-api-policy"  # Fixed name shared across all projects
-  role = aws_iam_role.lambda_email_processor.id
-
-  policy = jsonencode({
-    Version = "2012-10-17"
-    Statement = [
-      {
-        Effect = "Allow"
-        Action = [
-          "logs:CreateLogGroup",
-          "logs:CreateLogStream",
-          "logs:PutLogEvents"
-        ]
-        Resource = "arn:aws:logs:*:*:*"
-      },
-      {
-        Effect = "Allow"
-        Action = [
-          "s3:GetObject",
-          "s3:PutObject",
-          "s3:PutObjectAcl"
-        ]
-        Resource = [
-          "${aws_s3_bucket.mail_inbox.arn}/*",
-          "${aws_s3_bucket.webmail.arn}/*"
-        ]
-      },
-      {
-        Effect = "Allow"
-        Action = [
-          "s3:ListBucket"
-        ]
-        Resource = [
-          aws_s3_bucket.mail_inbox.arn,
-          aws_s3_bucket.webmail.arn
-        ]
-      },
-      {
-        Effect = "Allow"
-        Action = [
-          "ssm:GetParameter",
-          "ssm:GetParameters"
-        ]
-        # Allow reading SSM parameters for all domains
-        # The Lambda loads domain-specific config from SSM at runtime
-        # Pattern: /{domain-sanitized}/prod/* (e.g., /example-com/prod/*, /another-com/prod/*)
-        Resource = [
-          "arn:aws:ssm:${var.aws_region}:${data.aws_caller_identity.current.account_id}:parameter/*/prod/*",
-          # Also allow the project-specific prefix for backward compatibility
-          "arn:aws:ssm:${var.aws_region}:${data.aws_caller_identity.current.account_id}:parameter${var.ssm_prefix}/*"
-        ]
-      },
-      {
-        Effect = "Allow"
-        Action = [
-          "ses:SendEmail",
-          "ses:SendRawEmail"
-        ]
-        Resource = "*"
-      }
-    ]
-  })
 }
 
 # API Gateway REST API
@@ -718,7 +532,7 @@ resource "aws_api_gateway_integration" "lambda" {
 
   integration_http_method = "POST"
   type                    = "AWS_PROXY"
-  uri                     = aws_lambda_function.email_processor.invoke_arn
+  uri                     = data.aws_lambda_function.email_processor.invoke_arn
 }
 
 # API Gateway Method for OPTIONS (CORS)
@@ -737,17 +551,17 @@ resource "aws_api_gateway_integration" "options" {
 
   integration_http_method = "POST"
   type                    = "AWS_PROXY"
-  uri                     = aws_lambda_function.email_processor.invoke_arn
+  uri                     = data.aws_lambda_function.email_processor.invoke_arn
 }
 
 # Note: Method Response and Integration Response are not needed for AWS_PROXY integration
 # Lambda proxy integration returns the response directly from Lambda
 
-# Lambda permission for API Gateway
+# Lambda permission for API Gateway (unique per site API — shared Lambda)
 resource "aws_lambda_permission" "api_gateway" {
-  statement_id  = "AllowExecutionFromAPIGateway"
+  statement_id  = "AllowExecutionFromAPIGateway-${var.project_name}"
   action        = "lambda:InvokeFunction"
-  function_name = aws_lambda_function.email_processor.function_name
+  function_name = data.aws_lambda_function.email_processor.function_name
   principal     = "apigateway.amazonaws.com"
   source_arn    = "${aws_api_gateway_rest_api.main.execution_arn}/*/*"
 }
@@ -772,8 +586,8 @@ resource "aws_api_gateway_deployment" "main" {
       aws_api_gateway_method.options.id,
       aws_api_gateway_integration.lambda.id,
       aws_api_gateway_integration.options.id,
-      aws_lambda_function.email_processor.invoke_arn,
-      aws_lambda_function.email_processor.source_code_hash,
+      data.aws_lambda_function.email_processor.invoke_arn,
+      data.aws_lambda_function.email_processor.source_code_hash,
     ]))
   }
 }
@@ -785,7 +599,7 @@ resource "aws_api_gateway_stage" "main" {
   deployment_id = aws_api_gateway_deployment.main.id
   rest_api_id   = aws_api_gateway_rest_api.main.id
   stage_name    = "prod"
-  
+
   # Ensure stage is updated when deployment changes
   lifecycle {
     create_before_destroy = false

@@ -1,7 +1,1 @@
-{
-  "domain": "example.com",
-  "webmailDomain": "mail.example.com",
-  "ssmPrefix": "/example-com/prod",
-  "awsRegion": "us-east-1"
-}
 

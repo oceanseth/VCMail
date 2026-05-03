@@ -48,7 +48,7 @@ variable "s3_webmail_bucket_name" {
 }
 
 variable "shared_rule_set_name" {
-  description = "Optional: Name of existing SES rule set to use (for multi-project setups). If set, this project will add its rule to the existing rule set instead of creating a new one."
+  description = "Optional: Set to vcmail_rule_set for secondary domains so Terraform only adds a receipt rule to the shared multiproject rule set. Leave empty for the project that owns the rule set in Terraform state."
   type        = string
   default     = ""
 }

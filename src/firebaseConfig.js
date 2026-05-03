@@ -19,6 +19,7 @@ export const vcmailConfig = window.VCMAIL_CONFIG || {
   webmailDomain: "mail.example.com",
   apiEndpoint: "https://api.example.com",
   storageCacheKey: "vcmail_email_cache",
+  googleOAuthClientId: "",
   buildId: "local-dev"
 };
 

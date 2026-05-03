@@ -130,7 +130,7 @@ resources:
         Action: lambda:InvokeFunction
         Principal: ses.amazonaws.com
         SourceAccount: !Ref AWS::AccountId
-        SourceArn: "arn:aws:ses:${AWS_REGION}:${AWS_ACCOUNT_ID}:receipt-rule-set/${PROJECT_NAME}-incoming-email:receipt-rule/${PROJECT_NAME}-email-rule"
+        SourceArn: "arn:aws:ses:${AWS_REGION}:${AWS_ACCOUNT_ID}:receipt-rule-set/vcmail_rule_set:receipt-rule/${PROJECT_NAME}-email-rule"
     
     # Note: S3 Bucket Policy is managed by Terraform, not Serverless Framework
     # This avoids conflicts when both tools try to manage the same resource
