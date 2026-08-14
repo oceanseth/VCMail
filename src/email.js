@@ -30,6 +30,90 @@ const config = window.VCMAIL_CONFIG || vcmailConfig || {
   buildId: "unknown"
 };
 
+function decodeMimeHeaderBytes(bytes, charset) {
+  const charsetLower = (charset || 'utf-8').toLowerCase().replace(/_/g, '-');
+  const label = (charsetLower === 'utf8' || charsetLower === 'us-ascii' || charsetLower === 'ascii')
+    ? 'utf-8'
+    : charsetLower;
+
+  try {
+    return new TextDecoder(label).decode(bytes);
+  } catch (error) {
+    if (label === 'iso-8859-1' || label === 'iso8859-1' || label === 'latin1' || label === 'latin-1') {
+      return Array.from(bytes, byte => String.fromCharCode(byte)).join('');
+    }
+
+    try {
+      return new TextDecoder('utf-8').decode(bytes);
+    } catch (fallbackError) {
+      return Array.from(bytes, byte => String.fromCharCode(byte)).join('');
+    }
+  }
+}
+
+function decodeRfc2047EncodedWord(match, charset, encoding, encodedText) {
+  try {
+    let bytes;
+
+    if (encoding.toUpperCase() === 'B') {
+      const binary = atob(encodedText.replace(/\s/g, ''));
+      bytes = Uint8Array.from(binary, char => char.charCodeAt(0));
+    } else if (encoding.toUpperCase() === 'Q') {
+      const cleanedText = encodedText.replace(/=\r?\n/g, '').replace(/_/g, ' ');
+      const decodedBytes = [];
+      let i = 0;
+
+      while (i < cleanedText.length) {
+        if (cleanedText[i] === '=' && i + 2 < cleanedText.length) {
+          const hex = cleanedText.substring(i + 1, i + 3);
+          if (/^[A-Fa-f0-9]{2}$/.test(hex)) {
+            decodedBytes.push(parseInt(hex, 16));
+            i += 3;
+            continue;
+          }
+        }
+
+        decodedBytes.push(cleanedText.charCodeAt(i) & 0xFF);
+        i++;
+      }
+
+      bytes = Uint8Array.from(decodedBytes);
+    } else {
+      return match;
+    }
+
+    return decodeMimeHeaderBytes(bytes, charset);
+  } catch (error) {
+    console.warn('Failed to decode RFC 2047 header:', match, error);
+    return match;
+  }
+}
+
+function decodeRfc2047Header(value) {
+  if (typeof value !== 'string' || !value) return value;
+
+  return value
+    .replace(/=\?([^?]+)\?([BQ])\?([^?]*)\?=/gi, (match, charset, encoding, encodedText) => (
+      decodeRfc2047EncodedWord(match, charset, encoding, encodedText)
+    ))
+    .replace(/(^|[\s(<,;])\?([^?\s]+)\?([BQ])\?([^?]*)\?=/gi, (match, prefix, charset, encoding, encodedText) => (
+      prefix + decodeRfc2047EncodedWord(match.substring(prefix.length), charset, encoding, encodedText)
+    ));
+}
+
+function normalizeEmailAddressHeaders(email) {
+  if (!email) return email;
+
+  if (typeof email.from === 'string') {
+    email.from = decodeRfc2047Header(email.from);
+  }
+  if (typeof email.to === 'string') {
+    email.to = decodeRfc2047Header(email.to);
+  }
+
+  return email;
+}
+
 // Log build ID and Firebase config for debugging
 console.log('📦 VCMail Build ID:', config.buildId || 'missing');
 console.log('🔧 Firebase Config:', {
@@ -74,8 +158,8 @@ class EmailCache {
       const stored = localStorage.getItem(this.storageKey);
       if (stored) {
         const data = JSON.parse(stored);
-        this.inboxCache = new Map(data.inboxCache || []);
-        this.sentCache = new Map(data.sentCache || []);
+        this.inboxCache = new Map((data.inboxCache || []).map(([id, email]) => [id, normalizeEmailAddressHeaders(email)]));
+        this.sentCache = new Map((data.sentCache || []).map(([id, email]) => [id, normalizeEmailAddressHeaders(email)]));
         this.inboxOrder = data.inboxOrder || [];
         this.sentOrder = data.sentOrder || [];
         this.lastInboxQuery = data.lastInboxQuery || null;
@@ -133,26 +217,27 @@ class EmailCache {
   // Create lightweight email metadata (no content/attachments)
   createLightweightEmail(email) {
     if (!email) return email;
+    const normalizedEmail = normalizeEmailAddressHeaders({ ...email });
     return {
-      id: email.id,
-      subject: email.subject,
-      from: email.from,
-      to: email.to,
-      timestamp: email.timestamp,
-      read: email.read,
-      hasAttachments: email.hasAttachments,
-      attachmentCount: email.structure?.attachments?.length || email.attachmentCount || 0,
-      messageId: email.messageId,
-      contentType: email.contentType,
-      contentS3Key: email.contentS3Key, // Keep S3 key reference
-      structure: email.structure ? {
-        type: email.structure.type,
-        boundary: email.structure.boundary,
-        preferredContent: email.structure.preferredContent ? {
-          type: email.structure.preferredContent.type,
-          partKey: email.structure.preferredContent.partKey
+      id: normalizedEmail.id,
+      subject: normalizedEmail.subject,
+      from: normalizedEmail.from,
+      to: normalizedEmail.to,
+      timestamp: normalizedEmail.timestamp,
+      read: normalizedEmail.read,
+      hasAttachments: normalizedEmail.hasAttachments,
+      attachmentCount: normalizedEmail.structure?.attachments?.length || normalizedEmail.attachmentCount || 0,
+      messageId: normalizedEmail.messageId,
+      contentType: normalizedEmail.contentType,
+      contentS3Key: normalizedEmail.contentS3Key, // Keep S3 key reference
+      structure: normalizedEmail.structure ? {
+        type: normalizedEmail.structure.type,
+        boundary: normalizedEmail.structure.boundary,
+        preferredContent: normalizedEmail.structure.preferredContent ? {
+          type: normalizedEmail.structure.preferredContent.type,
+          partKey: normalizedEmail.structure.preferredContent.partKey
         } : null,
-        attachments: email.structure.attachments ? email.structure.attachments.map(att => ({
+        attachments: normalizedEmail.structure.attachments ? normalizedEmail.structure.attachments.map(att => ({
           partKey: att.partKey,
           filename: att.filename,
           contentType: att.contentType,
@@ -1211,11 +1296,11 @@ async function loadEmailFromS3(emailId, folder = 'inbox') {
     }
     
     // Combine metadata from API with content from S3
-    const fullEmail = {
+    const fullEmail = normalizeEmailAddressHeaders({
       id: emailId,
       ...apiData.metadata,
       content: emailContent
-    };
+    });
     
     // Add attachments to email object (both top-level and structure for compatibility)
     if (attachments.length > 0) {
@@ -1911,18 +1996,22 @@ function renderInboxList() {
     }
     li.innerHTML = `
       <div class="email-info">
-        <div class="email-subject">${email.subject || '(No subject)'}</div>
-        <div class="email-sender">${email.from}</div>
+        <div class="email-subject"></div>
+        <div class="email-sender"></div>
       </div>
       <div style="display: flex; align-items: center; gap: 8px;">
-        <div class="email-date">${formatDateForMobile(email.timestamp)}</div>
-        <button class="delete-btn" title="Delete" data-id="${email.id}">
+        <div class="email-date"></div>
+        <button class="delete-btn" title="Delete">
           <svg width="20" height="20" viewBox="0 0 20 20" fill="none" xmlns="http://www.w3.org/2000/svg">
             <path d="M6 8V15M10 8V15M14 8V15M3 5H17M8 5V3H12V5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
           </svg>
         </button>
       </div>
     `;
+    li.querySelector('.email-subject').textContent = email.subject || '(No subject)';
+    li.querySelector('.email-sender').textContent = email.from || '';
+    li.querySelector('.email-date').textContent = formatDateForMobile(email.timestamp);
+    li.querySelector('.delete-btn').dataset.id = email.id;
     // Delete button event
     li.querySelector('.delete-btn').addEventListener('click', async (e) => {
       e.stopPropagation();
