@@ -483,11 +483,18 @@ exports.handler = async (event, context) => {
         
         // Handle SES events first (these don't need Firebase)
         if (event.Records && event.Records[0].eventSource === 'aws:ses') {
-            // Extract domain from SES recipients
+            // Extract domain from SES recipients.
+            // receipt.recipients holds the envelope recipients this SES rule matched,
+            // so it is always addresses on this installation's domain. mail.destination
+            // mirrors the To/Cc headers: its first entry can be a foreign domain
+            // (Cc-only delivery) or another tenant's domain (multi-domain send),
+            // which made this Lambda load the wrong config and drop the email.
             const ses = event.Records[0].ses;
-            const recipients = ses?.mail?.destination || [];
+            const recipients = (ses?.receipt?.recipients?.length
+                ? ses.receipt.recipients
+                : ses?.mail?.destination || []).map(r => r.toLowerCase());
             let detectedDomain = null;
-            
+
             // Try to extract domain from first recipient
             for (const recipient of recipients) {
                 const domain = extractDomainFromRecipient(recipient);
@@ -1058,18 +1065,27 @@ async function handleSesEvent(event, domainConfig) {
                     
                     console.log('Parsed email data:', JSON.stringify(emailData, null, 2));
                     
-                    // Process each recipient
-                    const emailDomain = config.domain || 'example.com';
+                    // Process each envelope recipient. receipt.recipients is authoritative
+                    // (it includes Cc/Bcc deliveries and only this rule's domain);
+                    // mail.destination is header-derived and kept only as a fallback.
+                    const emailDomain = (config.domain || 'example.com').toLowerCase();
+                    const envelopeRecipients = [...new Set(
+                        (ses.receipt?.recipients?.length ? ses.receipt.recipients : ses.mail.destination || [])
+                            .map(r => r.toLowerCase())
+                    )];
+                    // SES reports receipt time; use it so recovered/replayed emails keep
+                    // their original position in the inbox instead of the store time.
+                    const receivedAt = ses.mail.timestamp ? new Date(ses.mail.timestamp).getTime() : Date.now();
                     console.log(`[INFO] Lambda configured for domain: ${emailDomain}`);
-                    console.log('Processing recipients:', ses.mail.destination);
-                    
+                    console.log('Processing recipients:', envelopeRecipients);
+
                     let hasMatchingRecipient = false;
-                    for (const recipient of ses.mail.destination) {
+                    for (const recipient of envelopeRecipients) {
                         console.log('Checking recipient:', recipient);
                         if (recipient.endsWith(`@${emailDomain}`)) {
                             const username = recipient.split('@')[0];
                             console.log(`[OK] Found @${emailDomain} recipient:`, username);
-                            await storeEmailForUser(username, ses.mail.messageId, emailData, config);
+                            await storeEmailForUser(username, ses.mail.messageId, emailData, config, receivedAt);
                             processedCount++;
                             hasMatchingRecipient = true;
                         } else {
@@ -1212,7 +1228,7 @@ async function saveAttachmentToS3(uid, emailId, attachmentIndex, attachmentData,
     }
 }
 
-async function storeEmailForUser(username, messageId, emailData, configParam = null) {
+async function storeEmailForUser(username, messageId, emailData, configParam = null, receivedAt = null) {
     console.log(`[INFO] Storing email for user: ${username}`);
     console.log(`Message ID: ${messageId}`);
     
@@ -1294,14 +1310,16 @@ async function storeEmailForUser(username, messageId, emailData, configParam = n
         // Create lightweight email record for Firebase (metadata only, no content/attachments)
         const normalizedEmailData = normalizeEmailAddressHeaders({
             from: emailData.from,
-            to: emailData.to
+            to: emailData.to,
+            cc: emailData.cc
         });
         const firebaseRecord = {
             messageId: messageId,
             from: normalizedEmailData.from,
             to: normalizedEmailData.to,
+            cc: normalizedEmailData.cc || '',
             subject: emailData.subject,
-            timestamp: Date.now(),
+            timestamp: receivedAt || Date.now(),
             contentType: contentType,
             headers: {
                 'content_type': emailData.headers.content_type || emailData.headers['content-type'] || '',
@@ -1597,6 +1615,9 @@ function normalizeEmailAddressHeaders(email) {
     if (typeof email.to === 'string') {
         email.to = decodeAddressHeaderValue(email.to);
     }
+    if (typeof email.cc === 'string') {
+        email.cc = decodeAddressHeaderValue(email.cc);
+    }
 
     return email;
 }
@@ -1782,13 +1803,15 @@ function parseEmailContent(content) {
         // Decode RFC 2047 encoded subject
         subject = decodeRfc2047(subject);
         
-        // Decode RFC 2047 encoded from and to fields
+        // Decode RFC 2047 encoded from, to and cc fields
         const from = decodeRfc2047(headers['from'] || '');
         const to = decodeRfc2047(headers['to'] || '');
+        const cc = decodeRfc2047(headers['cc'] || '');
 
         return {
             from: from,
             to: to,
+            cc: cc,
             subject: subject,
             headers: headers,
             body: body.trim()
@@ -1798,6 +1821,7 @@ function parseEmailContent(content) {
         return {
             from: '',
             to: '',
+            cc: '',
             subject: '',
             headers: {},
             body: content
