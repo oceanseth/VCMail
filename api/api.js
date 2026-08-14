@@ -483,11 +483,18 @@ exports.handler = async (event, context) => {
         
         // Handle SES events first (these don't need Firebase)
         if (event.Records && event.Records[0].eventSource === 'aws:ses') {
-            // Extract domain from SES recipients
+            // Extract domain from SES recipients.
+            // receipt.recipients holds the envelope recipients this SES rule matched,
+            // so it is always addresses on this installation's domain. mail.destination
+            // mirrors the To/Cc headers: its first entry can be a foreign domain
+            // (Cc-only delivery) or another tenant's domain (multi-domain send),
+            // which made this Lambda load the wrong config and drop the email.
             const ses = event.Records[0].ses;
-            const recipients = ses?.mail?.destination || [];
+            const recipients = (ses?.receipt?.recipients?.length
+                ? ses.receipt.recipients
+                : ses?.mail?.destination || []).map(r => r.toLowerCase());
             let detectedDomain = null;
-            
+
             // Try to extract domain from first recipient
             for (const recipient of recipients) {
                 const domain = extractDomainFromRecipient(recipient);
@@ -1058,18 +1065,27 @@ async function handleSesEvent(event, domainConfig) {
                     
                     console.log('Parsed email data:', JSON.stringify(emailData, null, 2));
                     
-                    // Process each recipient
-                    const emailDomain = config.domain || 'example.com';
+                    // Process each envelope recipient. receipt.recipients is authoritative
+                    // (it includes Cc/Bcc deliveries and only this rule's domain);
+                    // mail.destination is header-derived and kept only as a fallback.
+                    const emailDomain = (config.domain || 'example.com').toLowerCase();
+                    const envelopeRecipients = [...new Set(
+                        (ses.receipt?.recipients?.length ? ses.receipt.recipients : ses.mail.destination || [])
+                            .map(r => r.toLowerCase())
+                    )];
+                    // SES reports receipt time; use it so recovered/replayed emails keep
+                    // their original position in the inbox instead of the store time.
+                    const receivedAt = ses.mail.timestamp ? new Date(ses.mail.timestamp).getTime() : Date.now();
                     console.log(`[INFO] Lambda configured for domain: ${emailDomain}`);
-                    console.log('Processing recipients:', ses.mail.destination);
-                    
+                    console.log('Processing recipients:', envelopeRecipients);
+
                     let hasMatchingRecipient = false;
-                    for (const recipient of ses.mail.destination) {
+                    for (const recipient of envelopeRecipients) {
                         console.log('Checking recipient:', recipient);
                         if (recipient.endsWith(`@${emailDomain}`)) {
                             const username = recipient.split('@')[0];
                             console.log(`[OK] Found @${emailDomain} recipient:`, username);
-                            await storeEmailForUser(username, ses.mail.messageId, emailData, config);
+                            await storeEmailForUser(username, ses.mail.messageId, emailData, config, receivedAt);
                             processedCount++;
                             hasMatchingRecipient = true;
                         } else {
@@ -1212,7 +1228,7 @@ async function saveAttachmentToS3(uid, emailId, attachmentIndex, attachmentData,
     }
 }
 
-async function storeEmailForUser(username, messageId, emailData, configParam = null) {
+async function storeEmailForUser(username, messageId, emailData, configParam = null, receivedAt = null) {
     console.log(`[INFO] Storing email for user: ${username}`);
     console.log(`Message ID: ${messageId}`);
     
@@ -1292,12 +1308,18 @@ async function storeEmailForUser(username, messageId, emailData, configParam = n
         }
         
         // Create lightweight email record for Firebase (metadata only, no content/attachments)
-        const firebaseRecord = {
-            messageId: messageId,
+        const normalizedEmailData = normalizeEmailAddressHeaders({
             from: emailData.from,
             to: emailData.to,
+            cc: emailData.cc
+        });
+        const firebaseRecord = {
+            messageId: messageId,
+            from: normalizedEmailData.from,
+            to: normalizedEmailData.to,
+            cc: normalizedEmailData.cc || '',
             subject: emailData.subject,
-            timestamp: Date.now(),
+            timestamp: receivedAt || Date.now(),
             contentType: contentType,
             headers: {
                 'content_type': emailData.headers.content_type || emailData.headers['content-type'] || '',
@@ -1484,78 +1506,120 @@ function decodeHtmlEntities(str) {
     return decoded;
 }
 
-// Decode RFC 2047 encoded subjects (e.g., =?UTF-8?Q?Subject?=)
+function decodeWindows1252(buffer) {
+    const replacements = {
+        0x80: 0x20AC, 0x82: 0x201A, 0x83: 0x0192, 0x84: 0x201E,
+        0x85: 0x2026, 0x86: 0x2020, 0x87: 0x2021, 0x88: 0x02C6,
+        0x89: 0x2030, 0x8A: 0x0160, 0x8B: 0x2039, 0x8C: 0x0152,
+        0x8E: 0x017D, 0x91: 0x2018, 0x92: 0x2019, 0x93: 0x201C,
+        0x94: 0x201D, 0x95: 0x2022, 0x96: 0x2013, 0x97: 0x2014,
+        0x98: 0x02DC, 0x99: 0x2122, 0x9A: 0x0161, 0x9B: 0x203A,
+        0x9C: 0x0153, 0x9E: 0x017E, 0x9F: 0x0178
+    };
+
+    let decoded = '';
+    for (const byte of buffer) {
+        decoded += String.fromCodePoint(replacements[byte] || byte);
+    }
+    return decoded;
+}
+
+function decodeMimeHeaderBuffer(buffer, charset) {
+    const charsetLower = (charset || 'utf-8').toLowerCase().replace(/_/g, '-');
+
+    if (charsetLower === 'utf-8' || charsetLower === 'utf8' || charsetLower === 'us-ascii' || charsetLower === 'ascii') {
+        return buffer.toString('utf8');
+    }
+    if (charsetLower === 'iso-8859-1' || charsetLower === 'iso8859-1' || charsetLower === 'latin1' || charsetLower === 'latin-1') {
+        return buffer.toString('latin1');
+    }
+    if (charsetLower === 'windows-1252' || charsetLower === 'win-1252' || charsetLower === 'cp1252') {
+        return decodeWindows1252(buffer);
+    }
+
+    try {
+        return buffer.toString(charsetLower);
+    } catch (bufferError) {
+        try {
+            return new TextDecoder(charsetLower).decode(buffer);
+        } catch (decoderError) {
+            console.warn('Failed to convert MIME header charset:', charset, decoderError);
+            return buffer.toString('utf8');
+        }
+    }
+}
+
+function decodeRfc2047EncodedWord(match, charset, encoding, encodedText) {
+    try {
+        let buffer;
+
+        if (encoding.toUpperCase() === 'B') {
+            buffer = Buffer.from(encodedText.replace(/\s/g, ''), 'base64');
+        } else if (encoding.toUpperCase() === 'Q') {
+            const cleanedText = encodedText.replace(/=\r?\n/g, '').replace(/_/g, ' ');
+            const bytes = [];
+            let i = 0;
+
+            while (i < cleanedText.length) {
+                if (cleanedText[i] === '=' && i + 2 < cleanedText.length) {
+                    const hex = cleanedText.substring(i + 1, i + 3);
+                    if (/^[A-Fa-f0-9]{2}$/.test(hex)) {
+                        bytes.push(parseInt(hex, 16));
+                        i += 3;
+                        continue;
+                    }
+                }
+
+                bytes.push(cleanedText.charCodeAt(i) & 0xFF);
+                i++;
+            }
+
+            buffer = Buffer.from(bytes);
+        } else {
+            return match;
+        }
+
+        return decodeMimeHeaderBuffer(buffer, charset);
+    } catch (e) {
+        console.warn('Failed to decode RFC 2047:', match, e);
+        return match;
+    }
+}
+
+// Decode RFC 2047 encoded headers (e.g., =?UTF-8?Q?Subject?=)
 function decodeRfc2047(str) {
     if (!str) return str;
-    
-    // Pattern to match RFC 2047 encoded words: =?charset?encoding?encoded-text?=
-    const rfc2047Pattern = /=\?([^?]+)\?([BQ])\?([^?]*)\?=/gi;
-    
-    return str.replace(rfc2047Pattern, (match, charset, encoding, encodedText) => {
-        try {
-            let decodedText;
-            
-            if (encoding.toUpperCase() === 'B') {
-                // Base64 encoding
-                decodedText = Buffer.from(encodedText, 'base64').toString(charset.toLowerCase());
-            } else if (encoding.toUpperCase() === 'Q') {
-                // For quoted-printable, we need to decode the bytes first, then convert charset
-                let decodedBytes;
-                
-                // Remove soft line breaks first (=\r\n, =\n, =\r)
-                let cleanedText = encodedText.replace(/=\r?\n/g, '');
-                
-                // Build a buffer from the hex sequences
-                const buffer = Buffer.alloc(cleanedText.length);
-                let bufferIndex = 0;
-                let i = 0;
-                
-                while (i < cleanedText.length) {
-                    if (cleanedText[i] === '=' && i + 2 < cleanedText.length) {
-                        const hex = cleanedText.substring(i + 1, i + 3);
-                        if (/^[A-Fa-f0-9]{2}$/.test(hex)) {
-                            try {
-                                buffer[bufferIndex++] = parseInt(hex, 16);
-                                i += 3;
-                                continue;
-                            } catch (e) {
-                                console.warn('Failed to decode hex sequence:', hex);
-                            }
-                        }
-                    }
-                    buffer[bufferIndex++] = cleanedText.charCodeAt(i);
-                    i++;
-                }
-                
-                // Convert from the specified charset to UTF-8
-                try {
-                    const charsetLower = charset.toLowerCase();
-                    if (charsetLower === 'iso-8859-1' || charsetLower === 'latin1') {
-                        decodedText = buffer.slice(0, bufferIndex).toString('latin1');
-                    } else if (charsetLower === 'utf-8') {
-                        decodedText = buffer.slice(0, bufferIndex).toString('utf8');
-                    } else {
-                        // Fallback to UTF-8
-                        decodedText = buffer.slice(0, bufferIndex).toString('utf8');
-                    }
-                } catch (e) {
-                    console.warn('Failed to convert charset:', charset, e);
-                    decodedText = buffer.slice(0, bufferIndex).toString('utf8');
-                }
-                
-                // Convert underscores to spaces (RFC 2047 specific)
-                decodedText = decodedText.replace(/_/g, ' ');
-            } else {
-                // Unknown encoding, return original
-                return match;
-            }
-            
-            return decodedText;
-        } catch (e) {
-            console.warn('Failed to decode RFC 2047:', match, e);
-            return match; // Return original if decoding fails
-        }
-    });
+
+    const decodeStandardWord = (match, charset, encoding, encodedText) => {
+        return decodeRfc2047EncodedWord(match, charset, encoding, encodedText);
+    };
+    const decodeMissingEqualsWord = (match, prefix, charset, encoding, encodedText) => {
+        return prefix + decodeRfc2047EncodedWord(match.substring(prefix.length), charset, encoding, encodedText);
+    };
+
+    return str
+        .replace(/=\?([^?]+)\?([BQ])\?([^?]*)\?=/gi, decodeStandardWord)
+        .replace(/(^|[\s(<,;])\?([^?\s]+)\?([BQ])\?([^?]*)\?=/gi, decodeMissingEqualsWord);
+}
+
+function decodeAddressHeaderValue(value) {
+    return typeof value === 'string' ? decodeRfc2047(value) : value;
+}
+
+function normalizeEmailAddressHeaders(email) {
+    if (!email) return email;
+
+    if (typeof email.from === 'string') {
+        email.from = decodeAddressHeaderValue(email.from);
+    }
+    if (typeof email.to === 'string') {
+        email.to = decodeAddressHeaderValue(email.to);
+    }
+    if (typeof email.cc === 'string') {
+        email.cc = decodeAddressHeaderValue(email.cc);
+    }
+
+    return email;
 }
 
 function extractBoundary(contentType) {
@@ -1739,13 +1803,15 @@ function parseEmailContent(content) {
         // Decode RFC 2047 encoded subject
         subject = decodeRfc2047(subject);
         
-        // Decode RFC 2047 encoded from and to fields
+        // Decode RFC 2047 encoded from, to and cc fields
         const from = decodeRfc2047(headers['from'] || '');
         const to = decodeRfc2047(headers['to'] || '');
+        const cc = decodeRfc2047(headers['cc'] || '');
 
         return {
             from: from,
             to: to,
+            cc: cc,
             subject: subject,
             headers: headers,
             body: body.trim()
@@ -1755,6 +1821,7 @@ function parseEmailContent(content) {
         return {
             from: '',
             to: '',
+            cc: '',
             subject: '',
             headers: {},
             body: content
@@ -2043,10 +2110,10 @@ async function handleGetEmails(event, uid, headers, config) {
         
         const emails = [];
         snapshot.forEach((childSnapshot) => {
-            const email = {
+            const email = normalizeEmailAddressHeaders({
                 id: childSnapshot.key,
                 ...childSnapshot.val()
-            };
+            });
             
             // Apply search filter if provided
             if (!searchTerm || 
@@ -2991,6 +3058,8 @@ async function handleLoadEmail(event, uid, headers, config, lambdaContext) {
         } else {
             emailData = emailSnapshot.val();
         }
+
+        normalizeEmailAddressHeaders(emailData);
         console.log('[EMAIL] Email metadata from Firebase:', {
             emailId: actualEmailId,
             subject: emailData.subject,
