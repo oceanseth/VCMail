@@ -29,6 +29,18 @@ export function hasCalendarAccessToken() {
   return !!(t && exp > Date.now());
 }
 
+/** True when a token was ever stored, even if expired (user connected before). */
+export function hasStoredCalendarToken() {
+  return !!localStorage.getItem(STORAGE_TOKEN);
+}
+
+/** Non-interactive: stored token if still valid, else null. Never opens Google UI. */
+export function getLocallyValidAccessToken() {
+  const t = localStorage.getItem(STORAGE_TOKEN);
+  const exp = parseInt(localStorage.getItem(STORAGE_EXPIRY) || '0', 10);
+  return t && exp > Date.now() ? t : null;
+}
+
 /** True when OAuth client is configured and this browser has a valid Calendar token. */
 export function shouldShowIcsGoogleActions(cfg) {
   return isGoogleCalendarConfigured(cfg) && hasCalendarAccessToken();
