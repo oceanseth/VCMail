@@ -1590,6 +1590,11 @@ function decodeRfc2047EncodedWord(match, charset, encoding, encodedText) {
 function decodeRfc2047(str) {
     if (!str) return str;
 
+    // RFC 2047 §6.2: linear whitespace between two adjacent encoded words is
+    // deleted — senders split long subjects mid-word across encoded words when
+    // folding the header, so keeping the separator space corrupts the text.
+    str = str.replace(/(\?=)[ \t\r\n]+(=\?)/g, '$1$2');
+
     const decodeStandardWord = (match, charset, encoding, encodedText) => {
         return decodeRfc2047EncodedWord(match, charset, encoding, encodedText);
     };
