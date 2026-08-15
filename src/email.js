@@ -6,6 +6,8 @@ import {
   getGoogleOAuthClientId,
   isGoogleCalendarConfigured,
   hasCalendarAccessToken,
+  hasStoredCalendarToken,
+  getLocallyValidAccessToken,
   connectGoogleCalendar,
   disconnectGoogleCalendar,
   getValidAccessToken,
@@ -684,11 +686,20 @@ if (emailAttachmentsHeader) {
     const prevText = btn.textContent;
     btn.textContent = 'Adding…';
     try {
-      const token = await getValidAccessToken(clientId);
+      let token = await getValidAccessToken(clientId);
+      if (!token) {
+        // We are inside a user gesture, so a connect popup is acceptable here.
+        try {
+          const tr = await connectGoogleCalendar(clientId);
+          token = tr?.access_token || null;
+        } catch (connectErr) {
+          console.warn('Google Calendar connect failed', connectErr);
+        }
+      }
       if (!token) {
         btn.disabled = false;
         btn.textContent = prevText;
-        alert('Calendar session expired. Connect again in Settings.');
+        alert('Google Calendar connection was cancelled or failed. You can also connect in Settings.');
         return;
       }
       const icsText = await fetchIcsText(att);
@@ -756,10 +767,14 @@ async function hydrateIcsAttachmentsUi(attachmentsToShow) {
     const statusEl = row?.querySelector('.gcal-ics-status');
     if (!statusEl) continue;
 
-    const accessToken = await getValidAccessToken(clientId);
+    // Never open Google UI during render: use the stored token only if it is
+    // still valid. An expired token means the user connected before — show the
+    // import button and refresh the token inside the click (user gesture).
+    const accessToken = getLocallyValidAccessToken();
     if (!accessToken) {
-      statusEl.innerHTML =
-        '<button type="button" class="btn btn-secondary gcal-open-settings-btn">Connect Google Calendar</button>';
+      statusEl.innerHTML = hasStoredCalendarToken()
+        ? `<button type="button" class="btn btn-secondary gcal-import-btn" data-gcal-att-index="${index}">Add to Google Calendar</button>`
+        : '<button type="button" class="btn btn-secondary gcal-open-settings-btn">Connect Google Calendar</button>';
       continue;
     }
 
@@ -1423,6 +1438,10 @@ async function showEmailView(email) {
     console.log(`📧 Email already has content, using directly (length: ${email.content?.length || 0})`);
   }
   
+  // Keep viewingEmail in sync with what is actually rendered: the loaded email
+  // carries the attachments array the gcal import click handler reads.
+  viewingEmail = fullEmail;
+
   console.log(`📧 Final email data for display:`, {
     hasContent: !!fullEmail.content,
     contentLength: fullEmail.content?.length || 0,
