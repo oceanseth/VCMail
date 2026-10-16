@@ -1048,11 +1048,10 @@ async function handleSesEvent(event, domainConfig) {
                     const boundary = extractBoundary(contentType);
                     
                     if (boundary) {
-                        // This is a multipart email, extract the preferred part
+                        // Keep the raw MIME body. extractMimePart only returns text/html or
+                        // text/plain and used to overwrite body + content_type, which made
+                        // storeEmailForUser skip parseMultipartStructure and drop PDFs.
                         console.log('Processing multipart email with boundary:', boundary);
-                        const { body, content_type } = extractMimePart(emailData.body, boundary, true);
-                        emailData.body = body;
-                        emailData.headers.content_type = content_type;
                     } else {
                         // This is a simple email, just decode if needed
                         const transferEncoding = emailData.headers['content-transfer-encoding'] || '';
@@ -1262,10 +1261,16 @@ async function storeEmailForUser(username, messageId, emailData, configParam = n
             return;
         }
         
-        // Parse the complete multipart structure if it's a multipart email
+        // Parse the complete multipart structure if it's a multipart email.
+        // Prefer the original Content-Type header over extracted content_type
+        // (which is the body part type, e.g. text/plain, not multipart/mixed).
         let emailStructure = null;
         let preferredContent = emailData.body;
-        let contentType = emailData.headers.content_type || emailData.headers['content-type'] || '';
+        const originalContentType = emailData.headers['content-type'] || '';
+        const extractedContentType = emailData.headers.content_type || '';
+        let contentType = originalContentType.includes('multipart/')
+            ? originalContentType
+            : (extractedContentType || originalContentType);
         
         if (contentType.includes('multipart/')) {
             const boundary = extractBoundary(contentType);
@@ -3307,6 +3312,7 @@ async function handleLoadEmail(event, uid, headers, config, lambdaContext) {
                                                 filename: s3Info.filename,
                                                 contentType: s3Info.contentType,
                                                 size: s3Info.size,
+                                                s3Key: s3Info.s3Key,
                                                 url: attachmentUrl,
                                                 isInline: att.isInline || false,
                                                 partKey: att.partKey || `part_${idx}`,
@@ -3375,13 +3381,48 @@ async function handleLoadEmail(event, uid, headers, config, lambdaContext) {
                         hasContent: !!att.content,
                         hasDecodedContent: !!att.decodedContent
                     })));
+                    // Persist recovered attachments so the next list/open does not
+                    // depend on the view-time lazy parser (inbox is RTDB metadata).
+                    try {
+                        const persistPath = folder === 'emails'
+                            ? `emails/${uid}/${actualEmailId}`
+                            : `sent/${uid}/${actualEmailId}`;
+                        const persistRef = firebaseApp.database().ref(persistPath);
+                        const attachmentsS3 = parsedAttachments
+                            .filter(att => att.s3Key)
+                            .map(att => ({
+                                s3Key: att.s3Key,
+                                filename: att.filename,
+                                contentType: att.contentType,
+                                size: att.size,
+                                isInline: att.isInline || false,
+                                partKey: att.partKey
+                            }));
+                        const structureAttachments = parsedAttachments.map(att => ({
+                            partKey: att.partKey,
+                            filename: att.filename,
+                            contentType: att.contentType,
+                            size: att.size,
+                            s3Key: att.s3Key || null,
+                            isInline: att.isInline || false,
+                            ...(att.contentId && { contentId: att.contentId })
+                        }));
+                        const persistUpdates = {
+                            hasAttachments: true,
+                            attachmentCount: parsedAttachments.length
+                        };
+                        if (attachmentsS3.length > 0) {
+                            persistUpdates.attachmentsS3 = attachmentsS3;
+                        }
+                        persistUpdates['structure/attachments'] = structureAttachments;
+                        persistUpdates['structure/type'] = 'multipart';
+                        await persistRef.update(persistUpdates);
+                        console.log(`[OK] Persisted ${parsedAttachments.length} recovered attachments to ${persistPath}`);
+                    } catch (persistError) {
+                        console.error('[ERROR] Failed to persist recovered attachments to Firebase:', persistError);
+                    }
                 } else {
                     console.log(`[WARN] No parsed attachments to add (parsedAttachments.length: ${parsedAttachments.length})`);
-                    // If we parsed attachments but they weren't added, log a warning
-                    if (emailStructure.attachments && emailStructure.attachments.length > 0) {
-                        console.error(`[ERROR] CRITICAL: Parsed ${emailStructure.attachments.length} attachments but none were added to parsedAttachments!`);
-                        console.error(`   This indicates a bug in attachment processing logic.`);
-                    }
                 }
                 
             } catch (s3Error) {

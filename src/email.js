@@ -353,10 +353,15 @@ class EmailCache {
     if (cache.has(emailId)) {
       // Merge full content with existing metadata
       const existing = cache.get(emailId);
+      const loadedAttachments = fullEmail.attachments || fullEmail.structure?.attachments || [];
       cache.set(emailId, {
         ...existing,
         content: fullEmail.content,
-        structure: fullEmail.structure // Include full structure with attachment content
+        structure: fullEmail.structure, // Include full structure with attachment content
+        attachments: fullEmail.attachments || existing.attachments,
+        hasAttachments: loadedAttachments.length > 0 ? true : existing.hasAttachments,
+        attachmentCount: loadedAttachments.length > 0 ? loadedAttachments.length : existing.attachmentCount,
+        _attachmentsChecked: true
       });
       // Don't save to localStorage - this is temporary in-memory data
     }
@@ -1395,11 +1400,19 @@ async function showEmailView(email) {
   const hasContentS3Key = !!email.contentS3Key;
   const hasContent = !!email.content && email.content.length > 0;
   const hasMessageId = !!email.messageId;
+  const hasLoadedAttachments = (email.attachments && email.attachments.length > 0) ||
+    (email.structure?.attachments && email.structure.attachments.length > 0);
+  // Ingest used to store hasAttachments:false after stripping PDFs. If we already
+  // have the text body cached, skip loadEmail and the viewer never recovers them.
+  // One attempt per in-memory record when metadata says no attachments.
+  const needsAttachmentRecovery = hasMessageId && !hasLoadedAttachments &&
+    email.hasAttachments === false && !email._attachmentsChecked;
   
   // Need to load if:
   // 1. Has contentS3Key but no content, OR
-  // 2. No content at all (might be old email that needs loading from SES location)
-  const needsLoading = (hasContentS3Key && !hasContent) || (!hasContent && hasMessageId);
+  // 2. No content at all (might be old email that needs loading from SES location), OR
+  // 3. Attachment metadata is empty but a raw SES object may still have parts
+  const needsLoading = (hasContentS3Key && !hasContent) || (!hasContent && hasMessageId) || needsAttachmentRecovery;
   
   console.log(`📧 Email loading check:`, {
     needsLoading: needsLoading,
