@@ -52,7 +52,7 @@
       "usernames": {
         "$username": {
           ".read": true,
-          ".write": "auth != null",
+          ".write": "auth != null && (!data.exists() || data.val() == auth.uid)",
           ".validate": "auth != null && newData.isString() && newData.val() == auth.uid"
         }
       }
