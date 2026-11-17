@@ -1796,8 +1796,8 @@ function updateMessageCount() {
 // Email management
 async function setupUsername() {
   const uname = usernameInput.value.trim().toLowerCase();
-  if (!uname.match(/^[a-zA-Z0-9._-]{3,32}$/)) {
-    alert('Invalid username. Use 3-32 letters, numbers, dots, underscores or hyphens.');
+  if (!uname.match(/^[a-zA-Z0-9._-]{3,32}$/) || uname.startsWith('.') || uname.endsWith('.') || uname.includes('..')) {
+    alert('Invalid username. Use 3-32 letters, numbers, dots, underscores or hyphens, with no dot at either end and no two dots in a row.');
     return;
   }
   

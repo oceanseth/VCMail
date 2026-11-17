@@ -35,13 +35,23 @@ function fakeDatabase(initial = {}) {
         for (const k of Object.keys(data)) if (k === p || k.startsWith(`${p}/`)) delete data[k];
         if (v !== null && v !== undefined) data[p] = v;
     };
-    const ref = (p = '') => ({
+    // Like the real database: a key may not contain . $ # [ ] (or be empty).
+    const checkPath = (p) => {
+        for (const seg of String(p).split('/')) {
+            if (seg === '' || /[.$#\[\]]/.test(seg)) throw new Error(`Invalid database path: ${p}`);
+        }
+    };
+    const ref = (p = '') => { if (p) checkPath(p); return refFor(p); };
+    const refFor = (p) => ({
         once: async () => {
             const v = read(p);
             return { exists: () => v !== null && v !== undefined, val: () => v };
         },
         set: async (v) => write(p, v),
-        update: async (updates) => { for (const [k, v] of Object.entries(updates)) write(p ? `${p}/${k}` : k, v); },
+        update: async (updates) => {
+            for (const k of Object.keys(updates)) checkPath(p ? `${p}/${k}` : k);
+            for (const [k, v] of Object.entries(updates)) write(p ? `${p}/${k}` : k, v);
+        },
         transaction: async (fn) => write(p, fn(read(p)))
     });
     return { data, ref };
@@ -423,5 +433,87 @@ describe('storeEmailForUser', () => {
         const db = fakeDatabase({});
         assert.equal(await storeEmailForUser('ghost', 'ses-abc', emailData, fakeConfig('masky.ai', db), 1000), undefined);
         assert.equal(Object.keys(db.data).length, 0);
+    });
+});
+
+describe('addresses with a dot', () => {
+    it('are indexed under a key the database accepts, and found again', async () => {
+        const db = fakeDatabase({});
+        const config = fakeConfig('example.com', db);
+        const res = parse(await handleSetupEmail(post({ username: 'First.Last' }), { uid: 'u7' }, {}, config));
+        assert.equal(res.status, 200);
+        assert.equal(db.data['usernames/first,last'], 'u7');
+        assert.deepEqual(db.data['users/u7/profile'], { username: 'first.last', email: 'first.last@example.com' });
+        // Asking again is still "already mine", and someone else is still refused.
+        assert.equal(parse(await handleSetupEmail(post({ username: 'first.last' }), { uid: 'u7' }, {}, config)).status, 200);
+        assert.equal(parse(await handleSetupEmail(post({ username: 'first.last' }), { uid: 'u8' }, {}, config)).status, 409);
+        // A name that only looks alike without the dot is a different address.
+        assert.equal(parse(await handleSetupEmail(post({ username: 'firstlast' }), { uid: 'u8' }, {}, config)).status, 200);
+        assert.equal(db.data['usernames/firstlast'], 'u8');
+    });
+
+    it('refuses names a dot makes malformed', async () => {
+        const db = fakeDatabase({});
+        const config = fakeConfig('example.com', db);
+        for (const username of ['...', '.ai', 'a..b', 'mario.', '.mario', 'a,b', 'ab']) {
+            assert.equal(parse(await handleSetupEmail(post({ username }), { uid: 'u7' }, {}, config)).status, 400, username);
+        }
+        assert.deepEqual(Object.keys(db.data), []);
+    });
+
+    it('does not read a comma in a recipient as the dot it is stored as', async () => {
+        maskyAnswers(null);
+        const db = fakeDatabase({
+            'usernames/mario,ai': 'u1', 'users/u1/profile': { username: 'mario.ai', email: 'mario.ai@masky.ai' },
+            'usernames/bob': 'u3', 'users/u3/profile': { username: 'bob', email: 'bob@masky.ai' }
+        });
+        const config = fakeConfig('masky.ai', db);
+        const res = parse(await handleSendEmail(post({ to: 'mario,ai@masky.ai', subject: 's', body: 'b' }), { uid: 'u3' }, {}, config));
+        assert.equal(res.status, 404);
+        const emailData = { from: 'out@elsewhere.org', to: 'mario,ai@masky.ai', subject: 'hi', body: 'text', headers: { 'content-type': 'text/plain' } };
+        await storeEmailForUser('mario,ai', 'ses-comma', emailData, config, 1000).catch(() => null);
+        assert.equal(Object.keys(db.data).filter((k) => k.startsWith('emails/u1/')).length, 0);
+    });
+
+    it('moving to another address releases the dotted one', async () => {
+        const db = fakeDatabase({});
+        const config = fakeConfig('example.com', db);
+        await handleSetupEmail(post({ username: 'first.last' }), { uid: 'u7' }, {}, config);
+        assert.equal(parse(await handleSetupEmail(post({ username: 'plain' }), { uid: 'u7' }, {}, config)).status, 200);
+        assert.equal(db.data['usernames/first,last'], undefined);
+        assert.equal(db.data['usernames/plain'], 'u7');
+    });
+
+    it('asks the domain hook with the address as written', async () => {
+        maskyAnswers(verdict(true));
+        const db = fakeDatabase({});
+        const res = parse(await handleSetupEmail(post({ username: 'mario.ai' }), { uid: 'avmail_1' }, {}, fakeConfig('masky.ai', db)));
+        assert.equal(res.status, 200);
+        assert.equal(invokes[0].payload.username, 'mario.ai');
+        assert.equal(db.data['usernames/mario,ai'], 'avmail_1');
+        maskyAnswers(verdict(false, 'Addresses ending in .ai belong to Masky avatars.'));
+        const refused = parse(await handleSetupEmail(post({ username: 'luigi.ai' }), { uid: 'twitch:5' }, {}, fakeConfig('masky.ai', db)));
+        assert.equal(refused.status, 403);
+        assert.equal(db.data['usernames/luigi,ai'], undefined);
+    });
+
+    it('can send, and receive from the domain and from outside', async () => {
+        maskyAnswers(null);
+        const db = fakeDatabase({
+            'usernames/mario,ai': 'u1', 'users/u1/profile': { username: 'mario.ai', email: 'mario.ai@masky.ai' },
+            'usernames/bob': 'u3', 'users/u3/profile': { username: 'bob', email: 'bob@masky.ai' }
+        });
+        const config = fakeConfig('masky.ai', db);
+        const out = parse(await handleSendEmail(post({ to: 'bob@masky.ai', subject: 'hello', body: 'hi bob' }), { uid: 'u1' }, {}, config));
+        assert.equal(out.status, 200);
+        assert.equal(Object.keys(db.data).filter((k) => k.startsWith('emails/u3/')).length, 1);
+        const back = parse(await handleSendEmail(post({ to: 'Mario.AI@masky.ai', subject: 're', body: 'hi mario' }), { uid: 'u3' }, {}, config));
+        assert.equal(back.status, 200);
+        assert.equal(Object.keys(db.data).filter((k) => k.startsWith('emails/u1/')).length, 1);
+        const emailData = { from: 'out@elsewhere.org', to: 'mario.ai@masky.ai', subject: 'hi', body: 'text', headers: { 'content-type': 'text/plain' } };
+        const stored = await storeEmailForUser('mario.ai', 'ses-dot', emailData, config, 1000);
+        assert.equal(stored.uid, 'u1');
+        assert.equal(stored.username, 'mario.ai');
+        assert.equal(db.data[`emails/u1/${stored.emailKey}`].messageId, 'ses-dot');
     });
 });

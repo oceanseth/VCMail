@@ -1248,8 +1248,8 @@ async function storeEmailForUser(username, messageId, emailData, configParam = n
     try {
         // First, look up the UID for this username using the new usernames structure
         console.log(`Looking up UID for username: ${username}`);
-        const usernameRef = firebaseApp.database().ref(`usernames/${username}`);
-        const usernameSnapshot = await usernameRef.once('value');
+        const usernameRef = firebaseApp.database().ref(`usernames/${usernameIndexKey(username)}`);
+        const usernameSnapshot = isValidUsername(username) ? await usernameRef.once('value') : { exists: () => false };
         
         if (!usernameSnapshot.exists()) {
             console.error(`[ERROR] No user found for username: ${username}`);
@@ -1966,6 +1966,27 @@ function getFileExtension(mimeType) {
 
 // Helper functions to encode/decode email addresses for Firebase paths
 // Firebase Realtime Database doesn't allow '.', '#', '$', '[', ']' in path segments
+/**
+ * The key an address is indexed under in `usernames/`. Usernames may contain
+ * dots (first.last) and Realtime Database keys may not, so a dot is stored as
+ * a comma, which a username can never contain. Names without a dot are their
+ * own key, so existing entries are unchanged.
+ */
+function usernameIndexKey(username) {
+    return String(username == null ? '' : username).replace(/\./g, ',');
+}
+
+/**
+ * A username as setupEmail accepts it: 3-32 letters, digits, dot, underscore
+ * or hyphen, with no dot at either end and no two dots in a row. Anything
+ * else is never looked up in the index, so a recipient such as "a,b" cannot
+ * be read as the stored key of "a.b".
+ */
+function isValidUsername(username) {
+    const u = String(username == null ? '' : username);
+    return /^[a-zA-Z0-9._-]{3,32}$/.test(u) && !u.startsWith('.') && !u.endsWith('.') && !u.includes('..');
+}
+
 function encodeEmailForFirebase(email) {
     if (!email) return email;
     return email
@@ -2024,11 +2045,11 @@ async function handleSetupEmail(event, decodedToken, headers, config) {
         }
 
         username = username.trim().toLowerCase();
-        if (!username.match(/^[a-zA-Z0-9._-]{3,32}$/)) {
+        if (!isValidUsername(username)) {
             return {
                 statusCode: 400,
                 headers,
-                body: JSON.stringify({ error: 'Username must be 3-32 characters and can only contain letters, numbers, dots, underscores, or hyphens.' })
+                body: JSON.stringify({ error: 'Username must be 3-32 characters and can only contain letters, numbers, dots, underscores, or hyphens. It cannot start or end with a dot or have two dots in a row.' })
             };
         }
 
@@ -2041,7 +2062,7 @@ async function handleSetupEmail(event, decodedToken, headers, config) {
         const encodedEmail = encodeEmailForFirebase(email);
 
         const [usernameSnapshot, profileSnapshot, emailSnapshot] = await Promise.all([
-            db.ref(`usernames/${username}`).once('value'),
+            db.ref(`usernames/${usernameIndexKey(username)}`).once('value'),
             db.ref(`users/${uid}/profile`).once('value'),
             db.ref(`userEmails/${encodedEmail}`).once('value')
         ]);
@@ -2087,7 +2108,7 @@ async function handleSetupEmail(event, decodedToken, headers, config) {
         const updates = {};
 
         if (existingProfile?.username && existingProfile.username !== username) {
-            updates[`usernames/${existingProfile.username}`] = null;
+            updates[`usernames/${usernameIndexKey(existingProfile.username)}`] = null;
             if (existingProfile.email) {
                 // Encode the existing email for Firebase path
                 const encodedExistingEmail = encodeEmailForFirebase(existingProfile.email);
@@ -2095,7 +2116,7 @@ async function handleSetupEmail(event, decodedToken, headers, config) {
             }
         }
 
-        updates[`usernames/${username}`] = uid;
+        updates[`usernames/${usernameIndexKey(username)}`] = uid;
         updates[`users/${uid}/profile`] = { username, email };
         updates[`userEmails/${encodedEmail}`] = { uid };
 
@@ -2365,7 +2386,7 @@ async function handleSendEmail(event, decodedToken, headers, config = null) {
 
         const senderUsername = profileSnapshot.val().username;
         // The address index is the source of truth for who holds an address.
-        const senderIndexSnapshot = await firebaseApp.database().ref(`usernames/${senderUsername}`).once('value');
+        const senderIndexSnapshot = await firebaseApp.database().ref(`usernames/${usernameIndexKey(senderUsername)}`).once('value');
         if (!senderIndexSnapshot.exists() || senderIndexSnapshot.val() !== uid) {
             return {
                 statusCode: 403,
@@ -2382,12 +2403,14 @@ async function handleSendEmail(event, decodedToken, headers, config = null) {
 
         // Check if sending to same domain - handle directly without SES
         if (normalizedTo.endsWith(`@${emailDomain}`)) {
-            const recipientUsername = normalizedTo.split('@')[0];
+            const recipientUsername = normalizedTo.split('@')[0].toLowerCase();
             console.log(`[INFO] Same-domain email detected. Recipient: ${recipientUsername}`);
             
             // Check if recipient exists
-            const recipientUsernameRef = firebaseApp.database().ref(`usernames/${recipientUsername}`);
-            const recipientUsernameSnapshot = await recipientUsernameRef.once('value');
+            const recipientUsernameRef = firebaseApp.database().ref(`usernames/${usernameIndexKey(recipientUsername)}`);
+            const recipientUsernameSnapshot = isValidUsername(recipientUsername)
+                ? await recipientUsernameRef.once('value')
+                : { exists: () => false };
             
             if (!recipientUsernameSnapshot.exists()) {
                 return {
