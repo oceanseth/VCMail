@@ -136,6 +136,42 @@ async function s3BodyToUtf8(body) {
 
 /** Browser fetch() to S3 presigned URLs usually fails CORS; inline small .ics bodies in loadEmail JSON instead. */
 const ICS_ATTACHMENT_INLINE_MAX_BYTES = 512 * 1024;
+/** Same constraint for the HTML/text body. Emails with attachments skip the SES reparse path, so without this the UI only gets a contentUrl the browser cannot read. */
+const EMAIL_BODY_INLINE_MAX_BYTES = 512 * 1024;
+
+function shouldInlineEmailBody(sizeBytes) {
+    const size = Number(sizeBytes) || 0;
+    return size > 0 && size <= EMAIL_BODY_INLINE_MAX_BYTES;
+}
+
+async function inlineEmailBodyFromS3(s3Client, bucketName, key, sizeBytes) {
+    if (!shouldInlineEmailBody(sizeBytes)) return null;
+    const obj = await s3Client.send(new GetObjectCommand({
+        Bucket: bucketName,
+        Key: key
+    }));
+    return s3BodyToUtf8(obj.Body);
+}
+
+async function presignAndInlineEmailBody(s3Client, bucketName, key) {
+    const head = await s3Client.send(new HeadObjectCommand({
+        Bucket: bucketName,
+        Key: key
+    }));
+    const size = head.ContentLength || 0;
+    const url = await presignGetObject(s3Client, {
+        bucket: bucketName,
+        key,
+        expiresIn: 900
+    });
+    let content = null;
+    try {
+        content = await inlineEmailBodyFromS3(s3Client, bucketName, key, size);
+    } catch (inlineError) {
+        console.warn(`[WARN] Failed to inline email body from ${key}:`, inlineError.message);
+    }
+    return { url, content, size };
+}
 
 function isIcsLikeAttachmentMeta({ filename, contentType }) {
     const fn = (filename || '').toLowerCase();
@@ -3208,18 +3244,12 @@ async function handleLoadEmail(event, uid, headers, config, lambdaContext) {
                 // Verify the object exists before generating presigned URL
                 // This prevents NoSuchKey errors when the URL is accessed
                 try {
-                    await s3Client.send(new HeadObjectCommand({
-                        Bucket: bucketName,
-                        Key: contentS3Key
-                    }));
-                    console.log(`[OK] Verified S3 object exists: ${contentS3Key}`);
-                    
-                    // Object exists, generate presigned URL
-                    contentUrl = await presignGetObject(s3Client, {
-                        bucket: bucketName,
-                        key: contentS3Key,
-                        expiresIn: 900
-                    });
+                    const resolved = await presignAndInlineEmailBody(s3Client, bucketName, contentS3Key);
+                    contentUrl = resolved.url;
+                    if (resolved.content) {
+                        emailContent = resolved.content;
+                        console.log(`[OK] Inlined email body (${resolved.size} bytes) from ${contentS3Key}`);
+                    }
                     console.log(`[OK] Generated presigned URL for email content from S3: ${contentS3Key}`);
                 } catch (headError) {
                     if (isS3NotFound(headError)) {
@@ -3240,17 +3270,12 @@ async function handleLoadEmail(event, uid, headers, config, lambdaContext) {
                     try {
                         // Also verify this object exists
                         try {
-                            await s3Client.send(new HeadObjectCommand({
-                                Bucket: bucketName,
-                                Key: emailData.messageId
-                            }));
-                            console.log(`[OK] Verified fallback S3 object exists: ${emailData.messageId}`);
-                            
-                            contentUrl = await presignGetObject(s3Client, {
-                                bucket: bucketName,
-                                key: emailData.messageId,
-                                expiresIn: 900
-                            });
+                            const resolved = await presignAndInlineEmailBody(s3Client, bucketName, emailData.messageId);
+                            contentUrl = resolved.url;
+                            if (resolved.content && !emailContent) {
+                                emailContent = resolved.content;
+                                console.log(`[OK] Inlined email body (${resolved.size} bytes) from SES location ${emailData.messageId}`);
+                            }
                             console.log(`[OK] Generated presigned URL from old SES location: ${emailData.messageId}`);
                         } catch (headError) {
                             if (isS3NotFound(headError)) {
@@ -3519,17 +3544,12 @@ async function handleLoadEmail(event, uid, headers, config, lambdaContext) {
             try {
                 // Verify the object exists before generating presigned URL
                 try {
-                    await s3Client.send(new HeadObjectCommand({
-                        Bucket: bucketName,
-                        Key: fallbackS3Key
-                    }));
-                    console.log(`[OK] Verified fallback S3 object exists: ${fallbackS3Key}`);
-                    
-                    contentUrl = await presignGetObject(s3Client, {
-                        bucket: bucketName,
-                        key: fallbackS3Key,
-                        expiresIn: 900
-                    });
+                    const resolved = await presignAndInlineEmailBody(s3Client, bucketName, fallbackS3Key);
+                    contentUrl = resolved.url;
+                    if (resolved.content && !emailContent) {
+                        emailContent = resolved.content;
+                        console.log(`[OK] Inlined email body (${resolved.size} bytes) from fallback ${fallbackS3Key}`);
+                    }
                     console.log(`[OK] Generated presigned URL from fallback path: ${fallbackS3Key}`);
                 } catch (headError) {
                     if (isS3NotFound(headError)) {
@@ -3807,6 +3827,9 @@ module.exports = {
     parseMultipartStructure,
     extractFilename,
     decodePartContent,
+    shouldInlineEmailBody,
+    inlineEmailBodyFromS3,
+    EMAIL_BODY_INLINE_MAX_BYTES,
     handleSetupEmail,
     handleSendEmail,
     handleSesEvent,
