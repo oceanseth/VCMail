@@ -400,6 +400,7 @@ try {
 }
 
 const firebaseInitializer = require('../firebaseInit');
+const domainHooks = require('./domainHooks');
 const { decodeQuotedPrintable: decodeQuotedPrintableNew } = require('../decodeQuotedPrintable');
 
 // Helper function to sanitize strings for logging (removes non-ASCII characters)
@@ -1079,12 +1080,14 @@ async function handleSesEvent(event, domainConfig) {
                     console.log('Processing recipients:', envelopeRecipients);
 
                     let hasMatchingRecipient = false;
+                    const storedDeliveries = [];
                     for (const recipient of envelopeRecipients) {
                         console.log('Checking recipient:', recipient);
                         if (recipient.endsWith(`@${emailDomain}`)) {
                             const username = recipient.split('@')[0];
                             console.log(`[OK] Found @${emailDomain} recipient:`, username);
-                            await storeEmailForUser(username, ses.mail.messageId, emailData, config, receivedAt);
+                            const stored = await storeEmailForUser(username, ses.mail.messageId, emailData, config, receivedAt);
+                            if (stored) storedDeliveries.push(stored);
                             processedCount++;
                             hasMatchingRecipient = true;
                         } else {
@@ -1094,6 +1097,10 @@ async function handleSesEvent(event, domainConfig) {
                         }
                     }
                     
+                    // After storing, never between recipients: a slow hook
+                    // must not hold up anyone's mail.
+                    await Promise.all(storedDeliveries.map((delivery) => domainHooks.notifyEmailStored(delivery)));
+
                     if (!hasMatchingRecipient) {
                         console.log(`[INFO] No recipients matched this Lambda's domain (${emailDomain}). This is expected if SES routed the email incorrectly or if multiple Lambdas share the same rule set.`);
                         console.log(`[INFO] Returning success - the correct Lambda for this domain should process it.`);
@@ -1227,7 +1234,7 @@ async function saveAttachmentToS3(uid, emailId, attachmentIndex, attachmentData,
     }
 }
 
-async function storeEmailForUser(username, messageId, emailData, configParam = null, receivedAt = null) {
+async function storeEmailForUser(username, messageId, emailData, configParam = null, receivedAt = null, source = 'ses') {
     console.log(`[INFO] Storing email for user: ${username}`);
     console.log(`Message ID: ${messageId}`);
     
@@ -1441,9 +1448,25 @@ async function storeEmailForUser(username, messageId, emailData, configParam = n
         console.log(`[OK] Email statistics updated`);
         
         console.log(`[SUCCESS] Email stored successfully for user ${username} (UID: ${uid}) - content in S3, metadata in Firebase`);
+
+        // What was stored, for the caller to pass to the domain's hook once
+        // every recipient is safely stored.
+        return {
+            domain: (configParam && configParam.domain) || '',
+            username,
+            uid,
+            emailKey,
+            messageId,
+            source,
+            from: firebaseRecord.from || '',
+            to: firebaseRecord.to || '',
+            subject: firebaseRecord.subject || '',
+            timestamp: firebaseRecord.timestamp
+        };
         
     } catch (error) {
         console.error(`Error storing email for user ${username}:`, error);
+        return null;
     }
 }
 
@@ -2039,6 +2062,27 @@ async function handleSetupEmail(event, decodedToken, headers, config) {
             };
         }
 
+        // A domain can decide who may hold which address (api/domain-hooks/).
+        // Skipped when the caller already holds this one.
+        const alreadyHeld = usernameSnapshot.exists() && usernameSnapshot.val() === uid;
+        if (!alreadyHeld) {
+            const verdict = await domainHooks.checkUsername({
+                username,
+                email,
+                domain: emailDomain,
+                uid,
+                token: decodedToken,
+                firebaseApp
+            });
+            if (!verdict.allowed) {
+                return {
+                    statusCode: verdict.statusCode,
+                    headers,
+                    body: JSON.stringify({ error: verdict.error, errorCode: 'UsernameNotAllowed' })
+                };
+            }
+        }
+
         const existingProfile = profileSnapshot.exists() ? profileSnapshot.val() : null;
         const updates = {};
 
@@ -2282,7 +2326,9 @@ async function handleSendEmail(event, decodedToken, headers, config = null) {
             };
         }
 
-        const { to, subject, body: emailBody } = body;
+        const { to, body: emailBody } = body;
+        // A subject is a single header line.
+        const subject = typeof body.subject === 'string' ? body.subject.replace(/[\r\n]+/g, ' ').trim() : body.subject;
         const uid = decodedToken.uid;
 
         if (!to || !subject || !emailBody) {
@@ -2318,6 +2364,18 @@ async function handleSendEmail(event, decodedToken, headers, config = null) {
         }
 
         const senderUsername = profileSnapshot.val().username;
+        // The address index is the source of truth for who holds an address.
+        const senderIndexSnapshot = await firebaseApp.database().ref(`usernames/${senderUsername}`).once('value');
+        if (!senderIndexSnapshot.exists() || senderIndexSnapshot.val() !== uid) {
+            return {
+                statusCode: 403,
+                headers,
+                body: JSON.stringify({
+                    error: 'Your email address is not set up. Set it up again before sending.',
+                    errorCode: 'SenderNotRegistered'
+                })
+            };
+        }
         const emailDomain = (config && config.domain) ? config.domain : 'example.com';
         console.log(`[SENDEMAIL] Using domain: ${emailDomain} for sender email`);
         const senderEmail = `${senderUsername}@${emailDomain}`;
@@ -2377,7 +2435,7 @@ async function handleSendEmail(event, decodedToken, headers, config = null) {
             };
             
             // Store in Firebase using existing function (for recipient's inbox)
-            await storeEmailForUser(recipientUsername, messageId, emailData, config);
+            const storedDelivery = await storeEmailForUser(recipientUsername, messageId, emailData, config, null, 'local');
             
             // Also store in sender's sent folder (save to S3)
             const sentEmailKey = `email_${Date.now()}`;
@@ -2410,11 +2468,13 @@ async function handleSendEmail(event, decodedToken, headers, config = null) {
                 return (currentCount || 0) + 1;
             });
             console.log(`[OK] Sent email count updated`);
-            
+
+            if (storedDelivery) await domainHooks.notifyEmailStored(storedDelivery);
+
             return {
                 statusCode: 200,
                 headers,
-                body: JSON.stringify({ 
+                body: JSON.stringify({
                     message: 'Email sent successfully (same-domain delivery)',
                     messageId: messageId
                 })
@@ -3723,5 +3783,9 @@ module.exports = {
     parseEmailContent,
     parseMultipartStructure,
     extractFilename,
-    decodePartContent
+    decodePartContent,
+    handleSetupEmail,
+    handleSendEmail,
+    handleSesEvent,
+    storeEmailForUser
 };

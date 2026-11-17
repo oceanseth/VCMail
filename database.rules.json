@@ -9,7 +9,8 @@
           },
           "profile": {
             ".read": "auth != null && auth.uid == $userId",
-            ".write": "auth != null && auth.uid == $userId"
+            ".write": "auth != null && auth.uid == $userId",
+            ".validate": false
           },
           "emailCounts": {
             ".read": "auth != null && auth.uid == $userId",
@@ -52,8 +53,7 @@
       "usernames": {
         "$username": {
           ".read": true,
-          ".write": "auth != null",
-          ".validate": "auth != null && newData.isString() && newData.val() == auth.uid"
+          ".write": false
         }
       }
     }
