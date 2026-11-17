@@ -10,7 +10,7 @@
     "vcmail": "node bin/vcmail.js",
     "build": "vite build",
     "preview": "vite preview",
-    "test": "node --test api/ingest-attachments.test.js api/domain-hooks.test.js",
+    "test": "node --test api/ingest-attachments.test.js api/domain-hooks.test.js api/load-email-inline-body.test.js",
     "deploy-rules": "node scripts/deploy-database-rules.js",
     "cleanup-old-resources": "node scripts/cleanup-old-resources.js"
   },

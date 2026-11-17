@@ -1436,9 +1436,14 @@ async function showEmailView(email) {
       hasAttachments: loadedEmail?.structure?.attachments?.length || 0
     });
     
+    const loadedHasAttachments = !!(loadedEmail?.attachments?.length || loadedEmail?.structure?.attachments?.length);
     if (loadedEmail && loadedEmail.content) {
       fullEmail = loadedEmail;
       console.log(`✅ Using loaded email with content length: ${fullEmail.content?.length || 0}`);
+    } else if (loadedEmail && loadedHasAttachments) {
+      // Body fetch can fail CORS even when loadEmail already returned attachment URLs.
+      fullEmail = loadedEmail;
+      console.warn(`⚠️ Email body missing after loadEmail; rendering ${loadedEmail.attachments?.length || loadedEmail.structure?.attachments?.length} attachment(s)`);
     } else if (!email.content) {
       // Failed to load from S3 and no content available
       console.error(`❌ Failed to load email content and no fallback content available`);
